@@ -10,6 +10,7 @@ from main import (
     calculate_monthly_payment,
     simulate_mortgage,
     check_amortization_feasible,
+    create_overpayment_schedule,
 )
 
 
@@ -21,6 +22,73 @@ def test_calculate_monthly_payment_zero_interest():
 
     payment = calculate_monthly_payment(principal, annual_rate, months)
     assert payment == 1000.0  # 120000/120 = 1000
+
+
+def test_calculate_monthly_payment_zero_interest_long_term():
+    """Test monthly payment calculation with zero interest rate over a long term"""
+    principal = 100000
+    annual_rate = 0.0
+    months = 360  # 30 years
+
+    payment = calculate_monthly_payment(principal, annual_rate, months)
+    expected_payment = principal / months
+    assert isclose(payment, expected_payment, rel_tol=1e-10)
+    assert isclose(payment * months, principal, rel_tol=1e-10)  # Verify total payments equal principal
+
+
+def test_calculate_monthly_payment_zero_months():
+    """Test monthly payment calculation with zero months"""
+    principal = 100000
+    annual_rate = 0.05
+
+    # Zero months should return principal
+    payment = calculate_monthly_payment(principal, annual_rate, 0)
+    assert payment == principal
+
+    # Negative months should also return principal
+    payment = calculate_monthly_payment(principal, annual_rate, -1)
+    assert payment == principal
+
+
+def test_calculate_monthly_payment_high_interest():
+    """Test monthly payment calculation with high interest rates"""
+    principal = 100000
+    test_cases = [
+        (0.15, 360),    # 15% annual interest
+        (0.30, 120),    # 30% annual interest
+        (0.50, 60),     # 50% annual interest
+    ]
+
+    for annual_rate, months in test_cases:
+        payment = calculate_monthly_payment(principal, annual_rate, months)
+        
+        # Payment should be positive
+        assert payment > 0
+        
+        # Monthly payment should be greater than monthly interest on principal
+        # (otherwise the loan would never be paid off)
+        monthly_interest = principal * (annual_rate / 12.0)
+        assert payment > monthly_interest, (
+            f"Payment {payment:.2f} should be greater than monthly interest "
+            f"{monthly_interest:.2f} for rate {annual_rate*100:.1f}%"
+        )
+        
+        # Calculate total payments over the term
+        total_payments = payment * months
+        
+        # Total payments should exceed principal for interest-bearing loans
+        assert total_payments > principal, (
+            f"Total payments {total_payments:.2f} should exceed principal {principal:.2f} "
+            f"for interest rate {annual_rate*100:.1f}%"
+        )
+        
+        # Verify reasonable upper bound on monthly payment
+        # Monthly payment shouldn't exceed principal plus one month's interest
+        max_monthly = principal * (1 + annual_rate/12.0)
+        assert payment <= max_monthly, (
+            f"Payment {payment:.2f} should not exceed maximum monthly amount "
+            f"{max_monthly:.2f} for rate {annual_rate*100:.1f}%"
+        )
 
 
 def test_calculate_monthly_payment_typical_case():
@@ -212,3 +280,187 @@ def test_simulate_mortgage_with_overpayments_and_constraints():
             results["month_data"][i]["principal_end"]
             <= results["month_data"][i - 1]["principal_end"]
         )
+
+
+def test_create_overpayment_schedule_none():
+    """Test overpayment schedule creation with 'none' type"""
+    term_months = 12
+    schedule = create_overpayment_schedule(
+        term_months=term_months,
+        schedule_type='none'
+    )
+    
+    # Verify schedule length
+    assert len(schedule) == term_months
+    
+    # Verify all months have zero overpayment
+    assert all(amount == 0 for amount in schedule.values())
+    
+    # Verify all months from 0 to term_months-1 are present
+    assert set(schedule.keys()) == set(range(term_months))
+
+
+def test_create_overpayment_schedule_fixed():
+    """Test overpayment schedule creation with fixed monthly amount"""
+    term_months = 12
+    monthly_amount = 100
+    schedule = create_overpayment_schedule(
+        term_months=term_months,
+        schedule_type='fixed',
+        monthly_amount=monthly_amount
+    )
+    
+    # Verify schedule length
+    assert len(schedule) == term_months
+    
+    # Verify all months have the specified overpayment
+    assert all(amount == monthly_amount for amount in schedule.values())
+    
+    # Test with zero monthly amount
+    schedule_zero = create_overpayment_schedule(
+        term_months=term_months,
+        schedule_type='fixed',
+        monthly_amount=0
+    )
+    assert all(amount == 0 for amount in schedule_zero.values())
+
+
+def test_create_overpayment_schedule_lump_sum():
+    """Test overpayment schedule creation with lump sum payments"""
+    term_months = 24
+    
+    # Test lump sum within term
+    lump_sums = {6: 5000}
+    schedule = create_overpayment_schedule(
+        term_months=term_months,
+        schedule_type='lump_sum',
+        lump_sums=lump_sums
+    )
+    
+    # Verify specific month has correct amount
+    assert schedule[6] == 5000
+    # Verify all other months are zero
+    assert sum(schedule.values()) == 5000
+    
+    # Test lump sum outside term
+    lump_sums_outside = {15: 2000, 25: 3000}
+    schedule = create_overpayment_schedule(
+        term_months=12,
+        schedule_type='lump_sum',
+        lump_sums=lump_sums_outside
+    )
+    
+    # Verify out-of-range lump sums are ignored
+    assert all(amount == 0 for amount in schedule.values())
+    
+    # Test multiple lump sums
+    lump_sums_multiple = {3: 1000, 6: 2000, 9: 3000}
+    schedule = create_overpayment_schedule(
+        term_months=12,
+        schedule_type='lump_sum',
+        lump_sums=lump_sums_multiple
+    )
+    
+    # Verify correct amounts at specific months
+    assert schedule[3] == 1000
+    assert schedule[6] == 2000
+    assert schedule[9] == 3000
+    assert sum(schedule.values()) == 6000
+
+
+def test_create_overpayment_schedule_yearly_bonus():
+    """Test overpayment schedule creation with yearly bonus"""
+    term_months = 36
+    bonus_month = 12  # December
+    bonus_amount = 1000
+    
+    schedule = create_overpayment_schedule(
+        term_months=term_months,
+        schedule_type='yearly_bonus',
+        bonus_month=bonus_month,
+        bonus_amount=bonus_amount
+    )
+    
+    # Verify bonus months (11, 23, 35 for 0-based indexing)
+    expected_bonus_months = [11, 23, 35]  # December of each year (0-based)
+    
+    for month in range(term_months):
+        if month in expected_bonus_months:
+            assert schedule[month] == bonus_amount
+        else:
+            assert schedule[month] == 0
+    
+    # Test with different bonus month
+    schedule = create_overpayment_schedule(
+        term_months=term_months,
+        schedule_type='yearly_bonus',
+        bonus_month=6,  # June
+        bonus_amount=bonus_amount
+    )
+    
+    expected_bonus_months = [5, 17, 29]  # June of each year (0-based)
+    for month in range(term_months):
+        if month in expected_bonus_months:
+            assert schedule[month] == bonus_amount
+        else:
+            assert schedule[month] == 0
+
+
+def test_create_overpayment_schedule_custom():
+    """Test overpayment schedule creation with custom schedule"""
+    term_months = 12
+    
+    # Test valid and invalid months
+    custom_schedule = {
+        3: 200,    # valid
+        -1: 500,   # invalid - negative month
+        15: 700,   # invalid - beyond term
+        5: 300     # valid
+    }
+    
+    schedule = create_overpayment_schedule(
+        term_months=term_months,
+        schedule_type='custom',
+        custom_schedule=custom_schedule
+    )
+    
+    # Verify valid months have correct amounts
+    assert schedule[3] == 200
+    assert schedule[5] == 300
+    
+    # Verify invalid months are not included
+    assert -1 not in schedule  # Negative months should be filtered out
+    assert 15 not in schedule  # Months beyond term should be filtered out
+    
+    # Verify all other months are zero
+    total_overpayments = sum(schedule.values())
+    assert total_overpayments == 500  # Only valid month overpayments (200 + 300)
+    
+    # Verify schedule contains only valid months
+    assert all(0 <= month < term_months for month in schedule.keys())
+    assert all(month in range(term_months) for month in schedule.keys())
+    
+    # Test empty custom schedule
+    schedule = create_overpayment_schedule(
+        term_months=term_months,
+        schedule_type='custom',
+        custom_schedule={}
+    )
+    # Verify all months are zero and only valid months exist
+    assert all(amount == 0 for amount in schedule.values())
+    assert all(0 <= month < term_months for month in schedule.keys())
+    assert len(schedule) == term_months
+
+
+def test_create_overpayment_schedule_invalid_type():
+    """Test overpayment schedule creation with invalid schedule type"""
+    term_months = 12
+    
+    # Should default to all zeros for invalid type
+    schedule = create_overpayment_schedule(
+        term_months=term_months,
+        schedule_type='invalid_type'
+    )
+    
+    assert len(schedule) == term_months
+    assert all(amount == 0 for amount in schedule.values())
