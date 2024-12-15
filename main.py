@@ -75,6 +75,36 @@ def create_overpayment_schedule(term_months, schedule_type, **kwargs):
     
     return schedule
 
+def check_amortization_feasible(principal, rate, max_payment, term_months):
+    """
+    Check if a mortgage can be amortized within given constraints.
+    
+    Parameters:
+    - principal: Remaining principal
+    - rate: Annual interest rate
+    - max_payment: Maximum allowed monthly payment
+    - term_months: Remaining term in months
+    
+    Returns:
+    - (bool, float): (Is amortization possible, Required monthly payment)
+    """
+    if max_payment <= 0:
+        return False, float('inf')
+        
+    monthly_rate = rate / 12.0
+    monthly_interest = principal * monthly_rate
+    
+    # Calculate required payment for the term
+    if monthly_rate == 0:
+        required_payment = principal / term_months
+    else:
+        required_payment = monthly_rate * principal / (1 - (1 + monthly_rate)**(-term_months))
+    
+    # Check if payment can cover interest and amortize within term
+    is_feasible = max_payment >= required_payment and max_payment > monthly_interest
+    
+    return is_feasible, required_payment
+
 def simulate_mortgage(mortgage_amount,
                       term_months,
                       fixed_rate,
@@ -86,7 +116,8 @@ def simulate_mortgage(mortgage_amount,
                       initial_savings=0.0,
                       typical_payment=0.0,
                       asset_value=0.0,
-                      max_payment_after_fixed=float('inf')):
+                      max_payment_after_fixed=float('inf'),
+                      min_simulation_months=None):
     """
     Simulate a mortgage with a fixed period and then a variable rate according to mortgage_rate_curve.
     If overpayment > 1000 in any given month, recalculate the monthly payment going forward.
@@ -104,32 +135,65 @@ def simulate_mortgage(mortgage_amount,
     - typical_payment: float, if monthly payment is below this, difference is added to savings.
     - asset_value: float, value of the property (assumed constant).
     - max_payment_after_fixed: float, maximum allowed monthly payment after fixed period.
+    - min_simulation_months: int, minimum number of months to simulate, even after mortgage is paid.
 
     Returns:
-    dict with simulation results
+    dict with simulation results and warnings
     """
-
     # Initialize state variables
     principal = mortgage_amount
     current_month = 0
     total_months = term_months
+    mortgage_paid_off = False
+
+    # Check if amortization is possible with payment constraints
+    # First, calculate expected principal at end of fixed period
+    initial_payment = calculate_monthly_payment(principal, fixed_rate, term_months)
+    results = {
+        'month_data': [],
+        'warnings': []
+    }
+    
+    # Simulate fixed period to get principal at variable rate start
+    expected_principal = principal
+    for m in range(fixed_term_months):
+        monthly_rate = fixed_rate / 12.0
+        interest = expected_principal * monthly_rate
+        principal_repayment = initial_payment - interest
+        expected_principal -= principal_repayment
+    
+    # Check if variable rate period is feasible with max payment
+    if max_payment_after_fixed < float('inf'):
+        variable_rate = mortgage_rate_curve[0] if not callable(mortgage_rate_curve) else mortgage_rate_curve(0)
+        is_feasible, required_payment = check_amortization_feasible(
+            expected_principal,
+            variable_rate,
+            max_payment_after_fixed,
+            term_months - fixed_term_months
+        )
+        
+        if not is_feasible:
+            results['warnings'].append(
+                f"Warning: Maximum payment of £{max_payment_after_fixed:.2f} is insufficient to amortize "
+                f"£{expected_principal:.2f} over {term_months - fixed_term_months} months at {variable_rate*100:.2f}% "
+                f"(requires £{required_payment:.2f} monthly)."
+            )
 
     # Determine initial monthly payment for the fixed period
-    initial_payment = calculate_monthly_payment(principal, fixed_rate, term_months)
     current_monthly_payment = initial_payment
 
     # Savings account state
     savings_balance = initial_savings
-
-    results = {
-        'month_data': []
-    }
 
     # Helper function to get a monthly interest rate from an annual rate
     def monthly_rate(annual_rate):
         return annual_rate / 12.0
 
     for m in range(total_months):
+        # Stop if we've reached min_simulation_months and mortgage is paid off
+        if mortgage_paid_off and min_simulation_months and m >= min_simulation_months:
+            break
+
         # Determine whether we are in fixed period or variable rate period
         if m < fixed_term_months:
             # Within the fixed rate period
@@ -143,23 +207,13 @@ def simulate_mortgage(mortgage_amount,
                 annual_mortgage_rate = mortgage_rate_curve[idx]
 
             # Recalculate payment at the start of variable rate period or if rate changes
-            if m == fixed_term_months or (idx > 0 and mortgage_rate_curve[idx] != mortgage_rate_curve[idx-1]):
+            if not mortgage_paid_off and (m == fixed_term_months or (idx > 0 and mortgage_rate_curve[idx] != mortgage_rate_curve[idx-1])):
                 months_remaining = term_months - m
                 current_monthly_payment = calculate_monthly_payment(principal, annual_mortgage_rate, months_remaining)
                 
                 # Apply maximum payment constraint if needed
                 if current_monthly_payment > max_payment_after_fixed:
                     current_monthly_payment = max_payment_after_fixed
-                    # Extend the term if needed
-                    monthly_rate_val = monthly_rate(annual_mortgage_rate)
-                    if monthly_rate_val > 0:
-                        payment_ratio = principal * monthly_rate_val / max_payment_after_fixed
-                        if payment_ratio < 1:
-                            new_remaining_months = -math.log(1 - payment_ratio) / math.log(1 + monthly_rate_val)
-                            new_remaining_months = math.ceil(new_remaining_months)
-                            if m + new_remaining_months > total_months:
-                                total_months = m + new_remaining_months
-                                print(f"Term extended to {total_months/12:.1f} years to meet payment constraint")
 
         # Get savings rate
         if callable(savings_rate_curve):
@@ -168,36 +222,51 @@ def simulate_mortgage(mortgage_amount,
             annual_savings_rate = savings_rate_curve[m]
 
         # Get overpayment for this month
-        overpayment = overpayment_schedule.get(m, 0.0)
+        overpayment = 0 if mortgage_paid_off else overpayment_schedule.get(m, 0.0)
         
         # Ensure overpayment doesn't exceed available savings
         if overpayment > savings_balance:
+            original_overpayment = overpayment
             overpayment = savings_balance
+            results['warnings'].append(
+                f"Warning: At month {m}, overpayment reduced from £{original_overpayment:.2f} "
+                f"to £{overpayment:.2f} due to insufficient savings."
+            )
         
         # Deduct overpayment from savings
         savings_balance -= overpayment
 
         # Calculate interest for this month on the mortgage
         monthly_mortgage_rate = monthly_rate(annual_mortgage_rate)
-        interest_for_month = principal * monthly_mortgage_rate
+        interest_for_month = 0 if mortgage_paid_off else principal * monthly_mortgage_rate
 
         # Total payment this month (not including overpayment yet)
-        base_payment = current_monthly_payment
+        base_payment = 0 if mortgage_paid_off else current_monthly_payment
 
         # If total payment needed is more than principal + interest, we cap it at principal + interest
         total_payment = base_payment + overpayment
-        if total_payment > principal + interest_for_month:
-            # If paying more than due, just pay exactly what's needed
+        if not mortgage_paid_off and total_payment > principal + interest_for_month:
+            excess = total_payment - (principal + interest_for_month)
             total_payment = principal + interest_for_month
-            # Return excess overpayment to savings if we capped the total payment
-            savings_balance += (base_payment + overpayment) - total_payment
+            # Return excess overpayment to savings
+            savings_balance += excess
+            results['warnings'].append(
+                f"Note: At month {m}, £{excess:.2f} of overpayment returned to savings "
+                f"as it exceeded remaining principal + interest."
+            )
 
         # Principal portion is what's left after interest
-        principal_repaid = total_payment - interest_for_month
-        new_principal = principal - principal_repaid
+        principal_repaid = total_payment - interest_for_month if not mortgage_paid_off else 0
+        new_principal = principal - principal_repaid if not mortgage_paid_off else 0
 
-        # Update principal
-        principal = max(new_principal, 0.0)
+        # Update principal and check if mortgage is paid off
+        if not mortgage_paid_off:
+            principal = max(new_principal, 0.0)
+            if principal == 0:
+                mortgage_paid_off = True
+                results['warnings'].append(
+                    f"Note: Mortgage fully paid off at month {m} (Year {m/12:.1f})"
+                )
 
         # Calculate monthly savings rate
         monthly_savings_rate = monthly_rate(annual_savings_rate)
@@ -228,15 +297,15 @@ def simulate_mortgage(mortgage_amount,
             'savings_balance_end': savings_balance
         })
 
-        # If the mortgage is fully paid off, we can stop early
-        if principal <= 0:
-            break
-
-        # Recalculate monthly payment if overpayment > 1000
-        if overpayment > 1000 and principal > 0:
+        # Recalculate monthly payment if overpayment > 1000 and mortgage not paid off
+        if not mortgage_paid_off and overpayment > 1000 and principal > 0:
             # Recalculate monthly payment for the remaining term
             months_left = term_months - (m + 1)
-            current_monthly_payment = calculate_monthly_payment(principal, annual_mortgage_rate, months_left)
+            new_payment = calculate_monthly_payment(principal, annual_mortgage_rate, months_left)
+            if new_payment > max_payment_after_fixed and m >= fixed_term_months:
+                current_monthly_payment = max_payment_after_fixed
+            else:
+                current_monthly_payment = new_payment
 
     return results
 
@@ -277,13 +346,18 @@ def evaluate_schedule(x, args):
      initial_savings, typical_payment, asset_value, target_month,
      min_savings_buffer, available_months) = args
     
+    # First, check if total overpayments would violate minimum savings buffer
+    total_overpayments = sum(x)
+    if initial_savings - total_overpayments < min_savings_buffer:
+        return float('inf')
+    
     # Create schedule from x
     schedule = {m: 0 for m in range(term_months)}
     for i, month in enumerate(available_months):
         if i < len(x):
             schedule[month] = x[i]
     
-    # Run simulation
+    # Run simulation, ensuring it continues to target month
     results = simulate_mortgage(
         mortgage_amount,
         term_months,
@@ -295,10 +369,11 @@ def evaluate_schedule(x, args):
         monthly_savings_contribution,
         initial_savings,
         typical_payment,
-        asset_value
+        asset_value,
+        min_simulation_months=target_month + 1  # +1 to ensure we have the target month
     )
     
-    # Check minimum savings constraint
+    # Check minimum savings constraint throughout the simulation
     min_savings = min(data['savings_balance_end'] for data in results['month_data'])
     if min_savings < min_savings_buffer:
         return float('inf')  # Return infinity for invalid solutions
@@ -325,24 +400,24 @@ def optimize_overpayments(mortgage_amount,
                       asset_value,
                       target_year=5,
                       min_savings_buffer=50000,
-                      max_overpayment_months=4):
+                      max_overpayment_months=12):
     """
     Optimize overpayment schedule using differential evolution to maximize net worth
     at target_year while maintaining minimum savings.
     """
     target_month = target_year * 12
     
-    # Calculate maximum safe overpayment
-    max_safe_overpayment = initial_savings - min_savings_buffer
-    if max_safe_overpayment <= 0:
+    # Calculate maximum safe overpayment considering minimum buffer
+    max_safe_overpayment = (initial_savings - min_savings_buffer) / max_overpayment_months
+    if max_safe_overpayment <= 5000:  # Minimum meaningful overpayment
         print("Warning: No valid overpayment amounts possible with current savings buffer.")
         return {m: 0 for m in range(term_months)}, 0
     
     # Define available months for overpayments
-    # Look at the first 5 years after fixed term, or up to target year + 1 year
+    # Look at the first 7 years after fixed term, or up to target year + 1 year
     available_months = list(range(
         fixed_term_months,
-        min(fixed_term_months + 60, term_months, target_month + 12)
+        min(fixed_term_months + 84, term_months, target_month + 12)
     ))[:max_overpayment_months]  # Limit to max_overpayment_months
     
     if not available_months:
@@ -364,6 +439,7 @@ def optimize_overpayments(mortgage_amount,
     # Run differential evolution
     print(f"\nOptimizing overpayments using differential evolution...")
     print(f"Searching over {len(available_months)} months with overpayments between £5,000 and £{int(max_safe_overpayment):,}")
+    print(f"Maintaining minimum savings buffer of £{int(min_savings_buffer):,}")
     
     # Progress callback
     iterations = 0
@@ -382,10 +458,10 @@ def optimize_overpayments(mortgage_amount,
         bounds,
         args=(eval_args,),
         strategy='best1bin',
-        maxiter=100,  # Increased iterations
-        popsize=20,   # Increased population size
+        maxiter=15000,  # Increased iterations for more months
+        popsize=1000,   # Increased population size for more months
         mutation=(0.5, 1.5),  # Wider mutation range
-        recombination=0.9,    # Increased recombination probability
+        recombination=0.9,    # High recombination probability
         updating='deferred',
         workers=-1,
         callback=callback,
@@ -400,7 +476,7 @@ def optimize_overpayments(mortgage_amount,
     best_schedule = {m: 0 for m in range(term_months)}
     for i, month in enumerate(available_months):
         amount = result.x[i]
-        if amount > 5000:  # Only include overpayments above £5,000
+        if amount > 5000:  # Only include overpayments above ��5,000
             best_schedule[month] = amount
     
     # Calculate final net worth
@@ -541,12 +617,10 @@ def parse_args():
                       help='Manual overpayment schedule in format "month:amount,month:amount" (e.g., "18:20000,19:10000")')
     
     # Optimization parameters
-    parser.add_argument('--target-year', type=int, default=5,
-                      help='Target year for optimization (default: 5)')
     parser.add_argument('--min-savings', type=float, default=30000.0,
                       help='Minimum savings buffer for optimization (default: 30000.0)')
-    parser.add_argument('--max-overpayment-months', type=int, default=3,
-                      help='Maximum number of months with overpayments (default: 3)')
+    parser.add_argument('--max-overpayment-months', type=int, default=12,
+                      help='Maximum number of months with overpayments (default: 12)')
     
     return parser.parse_args()
 
@@ -724,12 +798,12 @@ if __name__ == "__main__":
             args.initial_savings,
             args.typical_payment,
             args.asset_value,
-            target_year=args.target_year,
+            target_year=args.term_years,  # Use full term as target
             min_savings_buffer=args.min_savings,
             max_overpayment_months=args.max_overpayment_months
         )
         print(f"\nOptimization Results:")
-        print(f"Best Net Worth at year {args.target_year}: £{int(best_net_worth):,}")
+        print(f"Best Net Worth at end of term (year {args.term_years}): £{int(best_net_worth):,}")
         print("\nOptimal Overpayment Schedule:")
         for month, amount in sorted(optimal_schedule.items()):
             if amount > 0:
@@ -744,7 +818,7 @@ if __name__ == "__main__":
     else:
         overpayment_schedule = {m: 0 for m in range(term_months)}
 
-    # Run simulation
+    # Run simulation for the full term
     results = simulate_mortgage(
         args.mortgage_amount,
         term_months,
@@ -757,7 +831,8 @@ if __name__ == "__main__":
         args.initial_savings,
         args.typical_payment,
         args.asset_value,
-        args.max_payment
+        args.max_payment,
+        min_simulation_months=term_months  # Always simulate full term
     )
 
     # Print debug information
