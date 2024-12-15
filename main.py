@@ -1,7 +1,7 @@
 import math
 import matplotlib.pyplot as plt
 import numpy as np
-from scipy.optimize import minimize
+from scipy.optimize import minimize, differential_evolution
 import itertools
 import json
 from datetime import datetime
@@ -261,6 +261,58 @@ def run_simulation_for_schedule(args, schedule):
     )
     return results, schedule
 
+def evaluate_schedule(x, args):
+    """
+    Evaluate a specific overpayment schedule.
+    
+    Parameters:
+    - x: Array of overpayment amounts
+    - args: Tuple containing all other parameters needed for simulation
+    
+    Returns:
+    - Negative net worth (for minimization) or infinity if constraints are violated
+    """
+    (mortgage_amount, term_months, fixed_rate, fixed_term_months,
+     mortgage_rate_curve, savings_rate_curve, monthly_savings_contribution,
+     initial_savings, typical_payment, asset_value, target_month,
+     min_savings_buffer, available_months) = args
+    
+    # Create schedule from x
+    schedule = {m: 0 for m in range(term_months)}
+    for i, month in enumerate(available_months):
+        if i < len(x):
+            schedule[month] = x[i]
+    
+    # Run simulation
+    results = simulate_mortgage(
+        mortgage_amount,
+        term_months,
+        fixed_rate,
+        fixed_term_months,
+        mortgage_rate_curve,
+        savings_rate_curve,
+        schedule,
+        monthly_savings_contribution,
+        initial_savings,
+        typical_payment,
+        asset_value
+    )
+    
+    # Check minimum savings constraint
+    min_savings = min(data['savings_balance_end'] for data in results['month_data'])
+    if min_savings < min_savings_buffer:
+        return float('inf')  # Return infinity for invalid solutions
+    
+    # Calculate net worth at target month
+    month_data = results['month_data']
+    if target_month < len(month_data):
+        target_data = month_data[target_month]
+    else:
+        target_data = month_data[-1]
+    
+    net_worth = target_data['savings_balance_end'] - target_data['principal_end'] + asset_value
+    return -net_worth  # Negative because we're minimizing
+
 def optimize_overpayments(mortgage_amount,
                       term_months,
                       fixed_rate,
@@ -275,86 +327,103 @@ def optimize_overpayments(mortgage_amount,
                       min_savings_buffer=50000,
                       max_overpayment_months=4):
     """
-    Optimize overpayment schedule to maximize net worth at target_year while maintaining minimum savings.
-    Uses parallel processing and smart search space reduction.
+    Optimize overpayment schedule using differential evolution to maximize net worth
+    at target_year while maintaining minimum savings.
     """
     target_month = target_year * 12
-    best_net_worth = float('-inf')
-    best_schedule = None
     
-    # Calculate maximum safe overpayment based on initial savings and buffer
+    # Calculate maximum safe overpayment
     max_safe_overpayment = initial_savings - min_savings_buffer
-    
-    # Create smarter increments based on maximum safe overpayment
-    base_increment = max_safe_overpayment / 10
-    possible_amounts = [
-        round(base_increment * i) 
-        for i in range(1, 6)
-        if base_increment * i <= max_safe_overpayment
-    ]
-    
-    if not possible_amounts:
+    if max_safe_overpayment <= 0:
         print("Warning: No valid overpayment amounts possible with current savings buffer.")
         return {m: 0 for m in range(term_months)}, 0
     
-    # Start after fixed period, but limit to next 24 months to reduce search space
+    # Define available months for overpayments
+    # Look at the first 5 years after fixed term, or up to target year + 1 year
     available_months = list(range(
         fixed_term_months,
-        min(fixed_term_months + 24, term_months, target_month + 12)
-    ))
+        min(fixed_term_months + 60, term_months, target_month + 12)
+    ))[:max_overpayment_months]  # Limit to max_overpayment_months
     
-    # Prepare arguments for parallel processing
-    sim_args = (
+    if not available_months:
+        print("Warning: No valid months available for overpayments.")
+        return {m: 0 for m in range(term_months)}, 0
+    
+    # Prepare arguments for evaluation function
+    eval_args = (
         mortgage_amount, term_months, fixed_rate, fixed_term_months,
         mortgage_rate_curve, savings_rate_curve, monthly_savings_contribution,
-        initial_savings, typical_payment, asset_value
+        initial_savings, typical_payment, asset_value, target_month,
+        min_savings_buffer, available_months
     )
     
-    # Create schedules for parallel processing
-    schedules = []
-    for num_months in range(1, min(max_overpayment_months + 1, len(available_months) + 1)):
-        for months_combination in itertools.combinations(available_months, num_months):
-            for amounts in itertools.product(possible_amounts, repeat=num_months):
-                schedule = {m: 0 for m in range(term_months)}
-                total_overpayment = sum(amounts)
-                
-                # Skip if total overpayment exceeds safe amount
-                if total_overpayment > max_safe_overpayment:
-                    continue
-                    
-                for month, amount in zip(months_combination, amounts):
-                    schedule[month] = amount
-                schedules.append(schedule)
+    # Define bounds for each overpayment
+    # Allow smaller overpayments (minimum 5000)
+    bounds = [(5000, max_safe_overpayment)] * len(available_months)
     
-    # Run simulations in parallel
-    print(f"Running {len(schedules)} simulations in parallel...")
-    with Pool(processes=cpu_count()) as pool:
-        run_sim = partial(run_simulation_for_schedule, sim_args)
-        results_list = pool.map(run_sim, schedules)
+    # Run differential evolution
+    print(f"\nOptimizing overpayments using differential evolution...")
+    print(f"Searching over {len(available_months)} months with overpayments between £5,000 and £{int(max_safe_overpayment):,}")
     
-    # Process results
-    for results, schedule in results_list:
-        # Check if this schedule maintains minimum savings
-        min_savings = min(data['savings_balance_end'] for data in results['month_data'])
-        if min_savings < min_savings_buffer:
-            continue
-        
-        # Calculate net worth at target year or last available month if mortgage paid off early
-        month_data = results['month_data']
-        if target_month < len(month_data):
-            target_data = month_data[target_month]
-        else:
-            target_data = month_data[-1]
-        
-        net_worth = target_data['savings_balance_end'] - target_data['principal_end'] + asset_value
-        
-        if net_worth > best_net_worth:
-            best_net_worth = net_worth
-            best_schedule = schedule.copy()
+    # Progress callback
+    iterations = 0
+    best_score = float('inf')
+    def callback(xk, convergence):
+        nonlocal iterations, best_score
+        iterations += 1
+        current_score = evaluate_schedule(xk, eval_args)
+        if current_score < best_score:
+            best_score = current_score
+            print(f"Iteration {iterations}: Best net worth = £{int(-best_score):,}")
+        return False
     
-    if best_schedule is None:
-        print("Warning: No valid schedule found that meets the constraints. Try adjusting the parameters.")
-        return {m: 0 for m in range(term_months)}, 0
+    result = differential_evolution(
+        evaluate_schedule,
+        bounds,
+        args=(eval_args,),
+        strategy='best1bin',
+        maxiter=100,  # Increased iterations
+        popsize=20,   # Increased population size
+        mutation=(0.5, 1.5),  # Wider mutation range
+        recombination=0.9,    # Increased recombination probability
+        updating='deferred',
+        workers=-1,
+        callback=callback,
+        disp=False,
+        polish=True  # Enable polishing step
+    )
+    
+    if not result.success:
+        print("\nWarning: Optimization may not have converged to the best solution.")
+    
+    # Create final schedule from best solution
+    best_schedule = {m: 0 for m in range(term_months)}
+    for i, month in enumerate(available_months):
+        amount = result.x[i]
+        if amount > 5000:  # Only include overpayments above £5,000
+            best_schedule[month] = amount
+    
+    # Calculate final net worth
+    results = simulate_mortgage(
+        mortgage_amount,
+        term_months,
+        fixed_rate,
+        fixed_term_months,
+        mortgage_rate_curve,
+        savings_rate_curve,
+        best_schedule,
+        monthly_savings_contribution,
+        initial_savings,
+        typical_payment,
+        asset_value
+    )
+    
+    if target_month < len(results['month_data']):
+        target_data = results['month_data'][target_month]
+    else:
+        target_data = results['month_data'][-1]
+    
+    best_net_worth = target_data['savings_balance_end'] - target_data['principal_end'] + asset_value
     
     return best_schedule, best_net_worth
 
@@ -585,10 +654,15 @@ def create_charts(results, asset_value, monthly_savings_contribution, typical_pa
     ax2.yaxis.set_major_formatter(plt.FuncFormatter(format_pounds))
     ax3.yaxis.set_major_formatter(plt.FuncFormatter(format_pounds))
     
+    # Set x-axis limits and ticks
+    max_year = max(years)
+    ax1.set_xlim(-0.5, max_year + 0.5)
     ax1.xaxis.set_major_locator(plt.MultipleLocator(1))
     ax1.xaxis.set_major_formatter(plt.FormatStrFormatter('%d'))
     
+    # Adjust layout to prevent text overlapping
     plt.tight_layout()
+    plt.subplots_adjust(top=0.95)  # Make room for the stats text
     plt.show()
 
 def print_debug_info(results, fixed_term_months):
