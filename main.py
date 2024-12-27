@@ -23,11 +23,16 @@ def calculate_monthly_payment(
       r = monthly interest rate (annual_interest_rate/12)
       PV = present value (principal)
       n = number of months
+      
+    Note: annual_interest_rate should be in percentage (e.g., 1.65 for 1.65%)
     """
     if months <= 0:
         return principal  # If no term left, just return what's due.
 
-    monthly_rate = annual_interest_rate / 12.0
+    # Convert percentage to decimal
+    annual_rate_decimal = annual_interest_rate / 100.0
+    monthly_rate = annual_rate_decimal / 12.0
+
     if monthly_rate == 0:
         # No interest scenario
         return principal / months
@@ -96,7 +101,7 @@ def check_amortization_feasible(
 
     Parameters:
     - principal: Remaining principal
-    - rate: Annual interest rate
+    - rate: Annual interest rate in percentage (e.g., 1.6 for 1.6%)
     - max_payment: Maximum allowed monthly payment
     - term_months: Remaining term in months
 
@@ -106,7 +111,9 @@ def check_amortization_feasible(
     if max_payment <= 0:
         return False, float("inf")
 
-    monthly_rate = rate / 12.0
+    # Convert percentage to decimal
+    rate_decimal = rate / 100.0
+    monthly_rate = rate_decimal / 12.0
     monthly_interest = principal * monthly_rate
 
     # Calculate required payment for the term
@@ -146,9 +153,10 @@ def check_variable_rate_feasibility(
     warning_message = ""
     if not is_feasible:
         warning_message = (
-            f"Warning: Maximum payment of £{max_payment_after_fixed:.2f} is insufficient to amortize "
-            f"£{expected_principal:.2f} over {term_months - fixed_term_months} months at {variable_rate*100:.2f}% "
-            f"(requires £{required_payment:.2f} monthly)."
+            f"Month {fixed_term_months}: Maximum payment of £{max_payment_after_fixed:,.2f} "
+            f"is insufficient to amortize £{expected_principal:,.2f} over "
+            f"{term_months - fixed_term_months} months at {variable_rate:.2f}% "
+            f"(requires £{required_payment:,.2f} monthly)."
         )
     
     return is_feasible, required_payment, warning_message
@@ -162,13 +170,17 @@ def calculate_fixed_period_principal(
 ) -> float:
     """
     Calculate the expected principal at the end of the fixed rate period.
+    fixed_rate is assumed to be an annual percentage (e.g., 2.0 means 2%).
     """
     expected_principal = principal
+    # Convert annual percentage rate (e.g. 2.0) to monthly decimal rate (e.g. 0.02 / 12)
+    monthly_decimal_rate = (fixed_rate / 100.0) / 12.0
+
     for _ in range(fixed_term_months):
-        monthly_rate = fixed_rate / 12.0
-        interest = expected_principal * monthly_rate
+        interest = expected_principal * monthly_decimal_rate
         principal_repayment = initial_payment - interest
         expected_principal -= principal_repayment
+
     return expected_principal
 
 
@@ -188,8 +200,8 @@ def handle_overpayment(
     
     if overpayment > savings_balance:
         warning_message = (
-            f"Warning: At month {month}, overpayment reduced from £{overpayment:.2f} "
-            f"to £{savings_balance:.2f} due to insufficient savings."
+            f"Month {month}: Overpayment reduced from £{overpayment:,.2f} "
+            f"to £{savings_balance:,.2f} due to insufficient savings."
         )
         adjusted_overpayment = savings_balance
     
@@ -218,7 +230,7 @@ def handle_payment_excess(
         adjusted_payment = principal + interest_for_month
         new_savings_balance = savings_balance + excess
         warning_message = (
-            f"Note: At month {month}, £{excess:.2f} of overpayment returned to savings "
+            f"Month {month}: £{excess:,.2f} of overpayment returned to savings "
             f"as it exceeded remaining principal + interest."
         )
         return adjusted_payment, new_savings_balance, warning_message
@@ -282,6 +294,100 @@ def record_month_data(
     }
 
 
+def validate_rate_curves(
+    term_months: int,
+    fixed_term_months: int,
+    mortgage_rate_curve: Union[List[float], Callable[[int], float]],
+    savings_rate_curve: Union[List[float], Callable[[int], float]]
+) -> List[str]:
+    """
+    Validate rate curves to ensure they have correct lengths and valid values.
+    
+    Returns:
+    - List of warning messages if any issues found
+    """
+    warnings = []
+    
+    # Check if fixed term is longer than total term
+    if fixed_term_months >= term_months:
+        warnings.append(
+            f"Fixed term ({fixed_term_months} months) must be less than total term ({term_months} months)"
+        )
+    
+    # Check mortgage rate curve
+    if not callable(mortgage_rate_curve):
+        expected_length = term_months - fixed_term_months
+        if len(mortgage_rate_curve) < expected_length:
+            warnings.append(
+                f"Mortgage rate curve too short: has {len(mortgage_rate_curve)} entries, "
+                f"needs {expected_length} for term of {term_months} months with "
+                f"{fixed_term_months} months fixed"
+            )
+        if any(rate < 0 for rate in mortgage_rate_curve):
+            warnings.append("Mortgage rate curve contains negative rates")
+    
+    # Check savings rate curve
+    if not callable(savings_rate_curve):
+        if len(savings_rate_curve) < term_months:
+            warnings.append(
+                f"Savings rate curve too short: has {len(savings_rate_curve)} entries, "
+                f"needs {term_months} for term of {term_months} months"
+            )
+        if any(rate < 0 for rate in savings_rate_curve):
+            warnings.append("Savings rate curve contains negative rates")
+    
+    return warnings
+
+
+def get_rate_for_month(
+    rate_curve: Union[List[float], Callable[[int], float]],
+    month: int,
+    default_rate: float,
+    curve_name: str
+) -> float:
+    """
+    Safely get rate for a given month from either a list or callable rate curve.
+    Returns default_rate if index is out of range.
+    """
+    try:
+        if callable(rate_curve):
+            return rate_curve(month)
+        else:
+            return rate_curve[month]
+    except (IndexError, ValueError) as e:
+        print(f"Warning: Error getting {curve_name} for month {month}, using {default_rate}%: {str(e)}")
+        return default_rate
+
+
+def ensure_payment_covers_interest(
+    current_payment: float,
+    principal: float,
+    annual_rate: float,
+    month: int
+) -> Tuple[float, Optional[str]]:
+    """
+    Ensure monthly payment covers interest to prevent negative amortization.
+    
+    Returns:
+    - Tuple of (adjusted_payment, warning_message)
+    """
+    if principal <= 0:
+        return current_payment, None
+        
+    monthly_rate = annual_rate / 100.0 / 12.0
+    interest_for_month = principal * monthly_rate
+    
+    if current_payment < interest_for_month:
+        warning = (
+            f"Month {month}: Payment of £{current_payment:.2f} cannot cover "
+            f"monthly interest of £{interest_for_month:.2f} at {annual_rate:.2f}%. "
+            f"Increased to cover interest."
+        )
+        return interest_for_month, warning
+        
+    return current_payment, None
+
+
 def simulate_mortgage(
     mortgage_amount: float,
     term_months: int,
@@ -294,87 +400,154 @@ def simulate_mortgage(
     initial_savings: float = 0.0,
     typical_payment: float = 0.0,
     asset_value: float = 0.0,
-    max_payment_after_fixed: float = float("inf"),
-    min_simulation_months: Optional[int] = None,
+    max_payment_after_fixed: float = float('inf')
 ) -> Dict[str, Any]:
     """
     Simulate a mortgage with a fixed period and then a variable rate according to mortgage_rate_curve.
-    If overpayment > 1000 in any given month, recalculate the monthly payment going forward.
+    
+    Parameters:
+    - mortgage_amount: float, initial principal
+    - term_months: int, total mortgage duration in months
+    - fixed_rate: float, annual interest rate for the fixed term in percentage (e.g., 1.65 for 1.65%)
+    - fixed_term_months: int, number of months for which the fixed_rate applies
+    - mortgage_rate_curve: array-like or callable giving the annual interest rate after the fixed term in percentage
+    - savings_rate_curve: array-like or callable giving the annual interest rate for savings in percentage
+    - overpayment_schedule: dict mapping month_index (0-based) to overpayment amount
+    - monthly_savings_contribution: float, amount contributed to savings each month
+    - initial_savings: float, starting balance in savings account
+    - typical_payment: float, if monthly payment is below this, difference is added to savings
+    - asset_value: float, value of the property (assumed constant)
+    - max_payment_after_fixed: float, maximum allowed monthly payment after fixed period
+    
+    Returns:
+    dict with simulation results including:
+    - month_data: list of dicts with monthly data where:
+        - month: 1-based month number (1 to term_months)
+        - year: decimal year (e.g., 1.5 for month 18)
+        - principal_start: principal at start of month
+        - principal_end: principal at end of month
+        - monthly_payment: base monthly payment
+        - overpayment: any overpayment made
+        - total_payment: monthly_payment + overpayment
+        - interest_paid: interest portion of payment
+        - principal_repaid: principal portion of payment
+        - savings_balance_end: savings balance at end of month
+        - savings_interest: interest earned on savings
+        - net_worth: savings - mortgage + asset_value
+        - annual_mortgage_rate: mortgage rate in percentage
+        - monthly_interest_rate: monthly mortgage rate in decimal
+        - annual_savings_rate: savings rate in percentage
+        - monthly_savings_rate: monthly savings rate in decimal
+    - warnings: list of warning messages
     """
+    # Validate inputs
+    results = {'month_data': [], 'warnings': []}
+    
+    # Validate rate curves
+    validation_warnings = validate_rate_curves(
+        term_months, fixed_term_months, mortgage_rate_curve, savings_rate_curve
+    )
+    if validation_warnings:
+        results['warnings'].extend(validation_warnings)
+        if any("must be less than" in w for w in validation_warnings):
+            return results  # Cannot proceed if fixed term >= total term
+
     # Initialize state variables
     principal = mortgage_amount
+    current_month = 0
     total_months = term_months
-    mortgage_paid_off = False
-    results = {"month_data": [], "warnings": []}
 
-    # Calculate initial payment and check feasibility
+    # Determine initial monthly payment for the fixed period
     initial_payment = calculate_monthly_payment(principal, fixed_rate, term_months)
+    current_monthly_payment = initial_payment
+
+    # Calculate expected principal at end of fixed period
     expected_principal = calculate_fixed_period_principal(
         principal, fixed_rate, fixed_term_months, initial_payment
     )
 
-    # Check variable rate feasibility
-    if max_payment_after_fixed < float("inf"):
-        variable_rate = (
-            mortgage_rate_curve[0]
-            if not callable(mortgage_rate_curve)
-            else mortgage_rate_curve(0)
+    # Check if variable rate period is feasible with payment constraint
+    if max_payment_after_fixed < float('inf'):
+        # Get initial variable rate
+        initial_variable_rate = get_rate_for_month(
+            mortgage_rate_curve,
+            0,  # First month after fixed period
+            fixed_rate,
+            "mortgage rate"
         )
-        _, _, warning = check_variable_rate_feasibility(
+        
+        # Check feasibility
+        is_feasible, required_payment = check_amortization_feasible(
             expected_principal,
-            variable_rate,
+            initial_variable_rate,
             max_payment_after_fixed,
-            term_months,
-            fixed_term_months
+            term_months - fixed_term_months
         )
-        if warning:
-            results["warnings"].append(warning)
+        
+        if not is_feasible:
+            results["warnings"].append(
+                f"Maximum payment of £{max_payment_after_fixed:,.2f} is insufficient to "
+                f"amortize £{expected_principal:,.2f} over {term_months - fixed_term_months} months "
+                f"at {initial_variable_rate:.2f}% (requires £{required_payment:,.2f} monthly)"
+            )
 
-    # Initialize payment and savings state
-    current_monthly_payment = initial_payment
+    # Savings account state
     savings_balance = initial_savings
 
     # Helper function to get a monthly interest rate from an annual rate
     def monthly_rate(annual_rate):
-        return annual_rate / 12.0
+        return annual_rate / 100.0 / 12.0
 
     for m in range(total_months):
-        # Stop if we've reached min_simulation_months and mortgage is paid off
-        if mortgage_paid_off and min_simulation_months and m >= min_simulation_months:
-            break
-
-        # Get rates for this month
+        # Determine whether we are in fixed period or variable rate period
         if m < fixed_term_months:
             annual_mortgage_rate = fixed_rate
         else:
+            # After fixed period, get rate from mortgage_rate_curve
             idx = m - fixed_term_months
-            annual_mortgage_rate = (
-                mortgage_rate_curve[idx]
-                if not callable(mortgage_rate_curve)
-                else mortgage_rate_curve(idx)
+            annual_mortgage_rate = get_rate_for_month(
+                mortgage_rate_curve,
+                idx,
+                fixed_rate,  # Use fixed rate as fallback
+                "mortgage rate"
             )
 
-            # Recalculate payment if needed
-            if not mortgage_paid_off and (
-                m == fixed_term_months
-                or (idx > 0 and mortgage_rate_curve[idx] != mortgage_rate_curve[idx - 1])
-            ):
+            # Recalculate payment for variable rate period
+            if m == fixed_term_months:
                 months_remaining = term_months - m
+                print(f"\nDEBUG: Transition to variable rate at month {m}")
+                print(f"DEBUG: Principal at transition: £{principal:.2f}")
+                print(f"DEBUG: Annual rate changing from {fixed_rate:.2f}% to {annual_mortgage_rate:.2f}%")
+                print(f"DEBUG: Months remaining: {months_remaining}")
+                
                 current_monthly_payment = calculate_monthly_payment(
                     principal, annual_mortgage_rate, months_remaining
                 )
-                if current_monthly_payment > max_payment_after_fixed and m >= fixed_term_months:
-                    current_monthly_payment = max_payment_after_fixed
+                print(f"DEBUG: Calculated payment: £{current_monthly_payment:.2f}")
+                
+                if max_payment_after_fixed < float('inf'):
+                    old_payment = current_monthly_payment
+                    current_monthly_payment = min(current_monthly_payment, max_payment_after_fixed)
+                    print(f"DEBUG: Payment constrained from £{old_payment:.2f} to £{current_monthly_payment:.2f}")
 
-        # Get savings rate
-        annual_savings_rate = (
-            savings_rate_curve[m]
-            if not callable(savings_rate_curve)
-            else savings_rate_curve(m)
+        # Ensure payment covers interest
+        current_monthly_payment, warning = ensure_payment_covers_interest(
+            current_monthly_payment, principal, annual_mortgage_rate, m
         )
+        if warning:
+            results["warnings"].append(warning)
+
+        # Get savings rate safely
+        annual_savings_rate = get_rate_for_month(
+            savings_rate_curve,
+            m,
+            0.0,  # Use 0% as fallback for savings
+            "savings rate"
+        )
+        monthly_savings_rate = monthly_rate(annual_savings_rate)
 
         # Handle overpayment
-        overpayment = 0 if mortgage_paid_off else overpayment_schedule.get(m, 0.0)
+        overpayment = overpayment_schedule.get(m, 0.0)
         overpayment, savings_balance, warning = handle_overpayment(
             overpayment, savings_balance, m
         )
@@ -383,60 +556,99 @@ def simulate_mortgage(
 
         # Calculate mortgage payments
         monthly_mortgage_rate = monthly_rate(annual_mortgage_rate)
-        interest_for_month = 0 if mortgage_paid_off else principal * monthly_mortgage_rate
-        base_payment = 0 if mortgage_paid_off else current_monthly_payment
+        interest_for_month = principal * monthly_mortgage_rate
+
+        base_payment = current_monthly_payment if principal > 0 else 0
 
         # Handle total payment and any excess
         total_payment = base_payment + overpayment
-        if not mortgage_paid_off:
-            total_payment, savings_balance, warning = handle_payment_excess(
-                total_payment, principal, interest_for_month, savings_balance, m
-            )
-            if warning:
-                results["warnings"].append(warning)
+        total_payment, savings_balance, warning = handle_payment_excess(
+            total_payment, principal, interest_for_month, savings_balance, m
+        )
+        if warning:
+            results["warnings"].append(warning)
 
         # Calculate principal portion and update mortgage state
-        principal_repaid = total_payment - interest_for_month if not mortgage_paid_off else 0
-        new_principal = principal - principal_repaid if not mortgage_paid_off else 0
+        principal_repaid = total_payment - interest_for_month
+        new_principal = principal - principal_repaid
 
-        if not mortgage_paid_off:
-            principal = max(new_principal, 0.0)
-            if principal == 0:
-                mortgage_paid_off = True
-                results["warnings"].append(
-                    f"Note: Mortgage fully paid off at month {m} (Year {m/12:.1f})"
-                )
+        if m >= fixed_term_months - 1 and m <= fixed_term_months + 1:
+            print(f"\nDEBUG: Month {m} payment breakdown:")
+            print(f"  Current payment: £{current_monthly_payment:.2f}")
+            print(f"  Base payment: £{base_payment:.2f}")
+            print(f"  Interest: £{interest_for_month:.2f}")
+            print(f"  Principal repaid: £{principal_repaid:.2f}")
+            print(f"  Principal: £{principal:.2f} -> £{new_principal:.2f}")
 
-        # Update savings
-        monthly_savings_rate = monthly_rate(annual_savings_rate)
-        savings_balance = update_savings_balance(
-            savings_balance,
-            monthly_savings_contribution,
-            typical_payment,
-            base_payment,
-            monthly_savings_rate
-        )
+        principal = max(new_principal, 0.0)
+        if principal == 0:
+            results["warnings"].append(
+                f"Note: Mortgage fully paid off at month {m + 1} (Year {(m + 1)/12:.1f})"
+            )
 
         # Record month data
-        results["month_data"].append(
-            record_month_data(
-                m, principal, principal_repaid, annual_mortgage_rate,
-                monthly_mortgage_rate, base_payment, overpayment,
-                interest_for_month, annual_savings_rate,
-                monthly_savings_rate, savings_balance
+        month_data = {
+            "month": m + 1,  # 1-based month indexing
+            "year": (m + 1) / 12,  # Year as decimal (e.g., 1.5 for month 18)
+            "principal_start": principal + principal_repaid,
+            "principal_end": principal,
+            "monthly_payment": base_payment,
+            "overpayment": overpayment,
+            "total_payment": total_payment,
+            "interest_paid": interest_for_month,
+            "principal_repaid": principal_repaid,
+            "savings_balance_end": savings_balance,
+            "savings_interest": savings_balance * monthly_savings_rate,
+            "net_worth": savings_balance - principal + asset_value,
+            "annual_mortgage_rate": annual_mortgage_rate,
+            "monthly_interest_rate": monthly_mortgage_rate,
+            "annual_savings_rate": annual_savings_rate,
+            "monthly_savings_rate": monthly_savings_rate
+        }
+        results["month_data"].append(month_data)
+
+        # Note when mortgage is paid off but continue simulation
+        if principal == 0 and not results.get("mortgage_paid_off_month"):
+            results["mortgage_paid_off_month"] = m + 1  # 1-based month indexing
+            results["warnings"].append(
+                f"Note: Mortgage fully paid off at month {m + 1} (Year {(m + 1)/12:.1f})"
             )
-        )
 
         # Recalculate monthly payment if overpayment > 1000 and mortgage not paid off
-        if not mortgage_paid_off and overpayment > 1000 and principal > 0:
+        if overpayment > 1000 and principal > 0:
             months_left = term_months - (m + 1)
             new_payment = calculate_monthly_payment(
                 principal, annual_mortgage_rate, months_left
             )
-            if new_payment > max_payment_after_fixed and m >= fixed_term_months:
-                current_monthly_payment = max_payment_after_fixed
-            else:
+            if new_payment < current_monthly_payment:
                 current_monthly_payment = new_payment
+                results["warnings"].append(
+                    f"Info: Reduced monthly payment to {new_payment:.2f} at month {m} due to overpayment"
+                )
+
+        # Update savings with interest and contribution
+        savings_interest = savings_balance * monthly_savings_rate
+        savings_balance = (
+            savings_balance
+            + savings_interest
+            + monthly_savings_contribution
+        )
+
+    # Add final summary to warnings if mortgage was paid off
+    if results.get("mortgage_paid_off_month"):
+        paid_off_month = results["mortgage_paid_off_month"]
+        final_savings = results["month_data"][-1]["savings_balance_end"]
+        final_net_worth = results["month_data"][-1]["net_worth"]
+        results["warnings"].append(
+            f"\nFinal Summary:\n"
+            f"Mortgage paid off at month {paid_off_month} (Year {paid_off_month/12:.1f})\n"
+            f"Final savings balance: £{final_savings:,.2f}\n"
+            f"Final net worth: £{final_net_worth:,.2f}"
+        )
+    elif principal > 0:
+        results["warnings"].append(
+            f"\nWarning: Mortgage not fully paid off. Remaining balance: £{principal:,.2f}"
+        )
 
     return results
 
@@ -608,7 +820,7 @@ def parse_args() -> Any:
         "--fixed-rate",
         type=float,
         required=True,
-        help="Fixed interest rate as decimal (e.g., 0.0165 for 1.65%%)",
+        help="Fixed interest rate in percentage (e.g., 3.0 for 3%%)",
     )
     parser.add_argument(
         "--fixed-term-months", type=int, required=True, help="Fixed rate term in months"
@@ -618,14 +830,14 @@ def parse_args() -> Any:
     parser.add_argument(
         "--variable-rate",
         type=float,
-        default=0.06,
-        help="Variable interest rate after fixed term (default: 0.06)",
+        default=6.0,
+        help="Variable interest rate after fixed term in percentage (default: 6.0)",
     )
     parser.add_argument(
         "--savings-rate",
         type=float,
-        default=0.04,
-        help="Annual savings interest rate (default: 0.04)",
+        default=4.0,
+        help="Annual savings interest rate in percentage (default: 4.0)",
     )
     parser.add_argument(
         "--monthly-savings",
@@ -680,28 +892,25 @@ def create_charts(
     Create and display charts from simulation results.
     """
     # Create lists for plotting
-    years = [data["month"] / 12 for data in results["month_data"]]
-    mortgage_balance = [data["principal_end"] for data in results["month_data"]]
-    savings_balance = [data["savings_balance_end"] for data in results["month_data"]]
+    years = [data['month']/12 for data in results['month_data']]
+    mortgage_balance = [data['principal_end'] for data in results['month_data']]
+    savings_balance = [data['savings_balance_end'] for data in results['month_data']]
     net_worth = [s - m + asset_value for s, m in zip(savings_balance, mortgage_balance)]
 
-    # Calculate net worth at specific years
-    def get_net_worth_at_year(target_year):
-        target_month = target_year * 12
-        if target_month >= len(results["month_data"]):
-            return None
-        data = results["month_data"][target_month]
-        return data["savings_balance_end"] - data["principal_end"] + asset_value
-
-    net_worth_3y = get_net_worth_at_year(3)
-    net_worth_5y = get_net_worth_at_year(5)
-    net_worth_10y = get_net_worth_at_year(10)
+    # Find minimum savings and its timing
+    min_savings = min(savings_balance)
+    min_savings_month = savings_balance.index(min_savings)
+    min_savings_year = years[min_savings_month]
 
     # Create figure with stats text and three subplots sharing x axis
     fig = plt.figure(figsize=(12, 13))
 
     # Add stats text at the top
     stats_text = "Net Worth Summary:\n"
+    net_worth_3y = net_worth[36] if len(net_worth) > 36 else None
+    net_worth_5y = net_worth[60] if len(net_worth) > 60 else None
+    net_worth_10y = net_worth[120] if len(net_worth) > 120 else None
+
     if net_worth_3y is not None:
         stats_text += f"Year 3:  £{int(net_worth_3y):,}\n"
     if net_worth_5y is not None:
@@ -709,7 +918,7 @@ def create_charts(
     if net_worth_10y is not None:
         stats_text += f"Year 10: £{int(net_worth_10y):,}"
 
-    fig.text(0.02, 0.98, stats_text, fontsize=10, fontfamily="monospace", va="top")
+    fig.text(0.02, 0.98, stats_text, fontsize=10, fontfamily='monospace', va='top')
 
     # Create subplot grid
     gs = fig.add_gridspec(4, 1, height_ratios=[0.2, 2, 1, 1])
@@ -717,58 +926,50 @@ def create_charts(
     ax2 = fig.add_subplot(gs[2], sharex=ax1)
     ax3 = fig.add_subplot(gs[3], sharex=ax1)
 
-    # Split monthly payments into components - only regular payment, no overpayments
-    interest_payments = [data["interest_paid"] for data in results["month_data"]]
-    principal_payments = [
-        data["monthly_payment"] - data["interest_paid"]
-        for data in results["month_data"]
-    ]
-
-    # Calculate monthly savings including extra from lower payments
-    monthly_savings = []
-    for data in results["month_data"]:
-        base_saving = monthly_savings_contribution
-        extra_saving = (
-            max(0, typical_payment - data["monthly_payment"])
-            if typical_payment > 0
-            else 0
-        )
-        monthly_savings.append(base_saving + extra_saving)
-
-    # Find minimum savings and its timing
-    min_savings = min(savings_balance)
-    min_savings_month = savings_balance.index(min_savings)
-    min_savings_year = years[min_savings_month]
-
     # Top subplot - Line chart for balances
-    ax1.plot(years, mortgage_balance, label="Mortgage Balance", color="red")
-    ax1.plot(years, savings_balance, label="Savings Balance", color="green")
-    ax1.plot(
-        years, net_worth, label="Net Worth", color="blue", linestyle="--", linewidth=2
-    )
-    ax1.set_ylabel("Amount")
-    ax1.set_title("Evolution of Mortgage, Savings and Net Worth Over Time")
-    ax1.grid(True, linestyle="--", alpha=0.7)
+    ax1.plot(years, mortgage_balance, label='Mortgage Balance', color='red')
+    ax1.plot(years, savings_balance, label='Savings Balance', color='green')
+    ax1.plot(years, net_worth, label='Net Worth', color='blue', linestyle='--', linewidth=2)
+    ax1.set_ylabel('Amount')
+    ax1.set_title('Evolution of Mortgage, Savings and Net Worth Over Time')
+    ax1.grid(True, linestyle='--', alpha=0.7)
     ax1.legend()
 
-    # Add minimum savings annotation
+    # Add minimum savings annotation with smart positioning
+    # Calculate annotation position to avoid overlaps
+    x_offset = 0.5  # Default x offset
+    y_offset = 20000  # Default y offset
+    
+    # Adjust if minimum occurs at start
+    if min_savings_month == 0:
+        x_offset = 1.0  # Move annotation more to the right
+    
+    # Adjust if minimum occurs at end
+    if min_savings_month == len(years) - 1:
+        x_offset = -1.0  # Move annotation to the left
+    
+    # Calculate y position to avoid overlap with axis
+    y_pos = min_savings + y_offset
+    if y_pos < ax1.get_ylim()[0]:
+        y_pos = min_savings + abs(y_offset)  # Move above if too low
+    
     ax1.annotate(
-        f"Minimum Savings: £{int(min_savings):,}\nYear {min_savings_year:.1f}",
+        f'Minimum Savings: £{int(min_savings):,}\nYear {min_savings_year:.1f}',
         xy=(min_savings_year, min_savings),
-        xytext=(min_savings_year + 0.5, min_savings + 20000),
-        arrowprops=dict(facecolor="black", shrink=0.05),
-        bbox=dict(boxstyle="round,pad=0.5", fc="yellow", alpha=0.5),
-        ha="left",
+        xytext=(min_savings_year + x_offset, y_pos),
+        arrowprops=dict(facecolor='black', shrink=0.05),
+        bbox=dict(boxstyle='round,pad=0.5', fc='yellow', alpha=0.5),
+        ha='left' if x_offset > 0 else 'right'
     )
 
     # Middle subplot - Stacked bar chart for monthly payments (regular payment only)
     width = 0.08
-    ax2.bar(years, interest_payments, width, label="Interest", color="red", alpha=0.6)
+    ax2.bar(years, [data['interest_paid'] for data in results['month_data']], width, label="Interest", color="red", alpha=0.6)
     ax2.bar(
         years,
-        principal_payments,
+        [data['monthly_payment'] - data['interest_paid'] for data in results['month_data']],
         width,
-        bottom=interest_payments,
+        bottom=[data['interest_paid'] for data in results['month_data']],
         label="Principal",
         color="blue",
         alpha=0.6,
@@ -780,7 +981,7 @@ def create_charts(
     # Bottom subplot - Bar chart for monthly savings
     ax3.bar(
         years,
-        monthly_savings,
+        [monthly_savings_contribution + (max(0, typical_payment - data['monthly_payment']) if typical_payment > 0 else 0) for data in results['month_data']],
         width=0.08,
         color="green",
         alpha=0.6,
@@ -944,8 +1145,7 @@ if __name__ == "__main__":
         args.initial_savings,
         args.typical_payment,
         args.asset_value,
-        args.max_payment,
-        min_simulation_months=term_months,  # Always simulate full term
+        args.max_payment
     )
 
     # Print debug information

@@ -23,7 +23,7 @@ def test_basic_command_execution():
     args = [
         "--mortgage-amount", "200000",
         "--term-years", "25",
-        "--fixed-rate", "0.0299",
+        "--fixed-rate", "2.99",
         "--fixed-term-months", "24"
     ]
     
@@ -115,10 +115,10 @@ def test_full_scenario_with_overpayments():
     args = [
         "--mortgage-amount", "300000",
         "--term-years", "25",
-        "--fixed-rate", "0.0299",
+        "--fixed-rate", "2.99",
         "--fixed-term-months", "24",
-        "--variable-rate", "0.0599",
-        "--savings-rate", "0.03",
+        "--variable-rate", "5.99",
+        "--savings-rate", "3.0",
         "--monthly-savings", "2000",
         "--initial-savings", "100000",
         "--typical-payment", "1500",
@@ -216,7 +216,7 @@ def test_zero_interest_after_fixed():
     args = [
         "--mortgage-amount", "300000",
         "--term-years", "25",
-        "--fixed-rate", "0.0299",
+        "--fixed-rate", "2.99",
         "--fixed-term-months", "24",
         "--variable-rate", "0.0"  # Zero interest after fixed period
     ]
@@ -258,10 +258,10 @@ def test_csv_output():
     args = [
         "--mortgage-amount", "300000",
         "--term-years", "25",
-        "--fixed-rate", "0.0299",
+        "--fixed-rate", "2.99",
         "--fixed-term-months", "24",
-        "--variable-rate", "0.0599",
-        "--savings-rate", "0.03",
+        "--variable-rate", "5.99",
+        "--savings-rate", "3.0",
         "--monthly-savings", "2000",
         "--initial-savings", "100000",
         "--asset-value", "350000"
@@ -300,7 +300,7 @@ def test_csv_output():
         assert int(float(first_row[0])) == 1, "First month should be 1"
         assert 0 < float(first_row[1]) < 0.1, "First year should be close to 0"
         assert float(first_row[2]) == 300000, "Initial principal should match mortgage amount"
-        assert 0 <= float(first_row[8]) <= 1, "Annual mortgage rate should be between 0 and 1"
+        assert 0 <= float(first_row[8]) <= 100, "Annual mortgage rate should be between 0 and 100 percent"
         assert float(first_row[7]) == 0, "No overpayment expected in first month"
         
         # Read all rows to verify completeness
