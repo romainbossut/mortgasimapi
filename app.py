@@ -1,0 +1,282 @@
+import streamlit as st
+import matplotlib.pyplot as plt
+from main import simulate_mortgage, create_charts
+
+def main():
+    st.title("Interactive Mortgage Calculator")
+    st.write("Adjust the parameters below to see how they affect your mortgage and savings.")
+
+    # Create two columns for input parameters
+    col1, col2 = st.columns(2)
+
+    with col1:
+        st.subheader("Mortgage Parameters")
+        mortgage_amount = st.number_input(
+            "Mortgage Amount (£)",
+            min_value=0.0,
+            value=150000.0,
+            step=1000.0,
+            format="%0.2f"
+        )
+        
+        term_years = st.number_input(
+            "Term (Years)",
+            min_value=1.0,
+            max_value=40.0,
+            value=25.0,
+            step=1.0,
+            format="%0.1f"
+        )
+        
+        fixed_rate = st.number_input(
+            "Fixed Interest Rate (%)",
+            min_value=0.0,
+            max_value=15.0,
+            value=3.0,
+            step=0.1,
+            format="%0.2f"
+        )
+        
+        fixed_term_months = st.number_input(
+            "Fixed Term (Months)",
+            min_value=0,
+            max_value=int(term_years * 12),
+            value=24,
+            step=1
+        )
+        
+        variable_rate = st.number_input(
+            "Variable Rate after Fixed Term (%)",
+            min_value=0.0,
+            max_value=15.0,
+            value=6.0,
+            step=0.1,
+            format="%0.2f"
+        )
+
+    with col2:
+        st.subheader("Savings Parameters")
+        savings_rate = st.number_input(
+            "Savings Interest Rate (%)",
+            min_value=0.0,
+            max_value=15.0,
+            value=4.0,
+            step=0.1,
+            format="%0.2f"
+        )
+        
+        monthly_savings = st.number_input(
+            "Monthly Savings Contribution (£)",
+            min_value=0.0,
+            value=2500.0,
+            step=100.0,
+            format="%0.2f"
+        )
+        
+        initial_savings = st.number_input(
+            "Initial Savings (£)",
+            min_value=0.0,
+            value=150000.0,
+            step=1000.0,
+            format="%0.2f"
+        )
+        
+        typical_payment = st.number_input(
+            "Typical Monthly Payment (£)",
+            min_value=0.0,
+            value=878.0,
+            step=10.0,
+            format="%0.2f"
+        )
+        
+        asset_value = st.number_input(
+            "Property Value (£)",
+            min_value=0.0,
+            value=360000.0,
+            step=1000.0,
+            format="%0.2f"
+        )
+
+    # Advanced options in an expander
+    with st.expander("Advanced Options"):
+        has_max_payment = st.checkbox("Limit monthly payment after fixed term", value=False)
+        if has_max_payment:
+            max_payment = st.number_input(
+                "Maximum Monthly Payment after Fixed Term (£)",
+                min_value=0.0,
+                value=1000.0,
+                step=100.0,
+                format="%0.2f"
+            )
+        else:
+            max_payment = float('inf')
+        
+        overpayments = st.text_input(
+            "Overpayments (format: 'month:amount,month:amount')",
+            value="",
+            help="Example: '18:20000,19:10000' for £20,000 in month 18 and £10,000 in month 19"
+        )
+
+    # Convert parameters
+    term_months = int(term_years * 12)
+    mortgage_rate_curve = [variable_rate for _ in range(term_months - fixed_term_months)]
+    savings_rate_curve = [savings_rate for _ in range(term_months)]
+
+    # Parse overpayments
+    overpayment_schedule = {m: 0 for m in range(term_months)}
+    if overpayments:
+        pairs = overpayments.split(",")
+        for pair in pairs:
+            if ":" in pair:
+                month_str, amount_str = pair.split(":")
+                try:
+                    month = int(month_str)
+                    amount = float(amount_str)
+                    if 0 <= month < term_months:
+                        overpayment_schedule[month] = amount
+                except ValueError:
+                    st.warning(f"Invalid overpayment entry: {pair}")
+
+    # Run simulation
+    results = simulate_mortgage(
+        mortgage_amount,
+        term_months,
+        fixed_rate,
+        fixed_term_months,
+        mortgage_rate_curve,
+        savings_rate_curve,
+        overpayment_schedule,
+        monthly_savings,
+        initial_savings,
+        typical_payment,
+        asset_value,
+        max_payment
+    )
+
+    # Display charts
+    st.subheader("Charts")
+    
+    # Create lists for plotting
+    years = [data['month']/12 for data in results['month_data']]
+    mortgage_balance = [data['principal_end'] for data in results['month_data']]
+    savings_balance = [data['savings_balance_end'] for data in results['month_data']]
+    net_worth = [s - m + asset_value for s, m in zip(savings_balance, mortgage_balance)]
+
+    # Create figure and subplots
+    fig = plt.figure(figsize=(12, 16))
+    gs = fig.add_gridspec(5, 1, height_ratios=[0.2, 2, 1, 1, 1])
+    
+    # Stats text at the top
+    stats_text = "Net Worth Summary:\n"
+    savings_2y = savings_balance[24] if len(savings_balance) > 24 else None
+    savings_3y = savings_balance[36] if len(savings_balance) > 36 else None
+    savings_5y = savings_balance[60] if len(savings_balance) > 60 else None
+    savings_10y = savings_balance[120] if len(savings_balance) > 120 else None
+    net_worth_3y = net_worth[36] if len(net_worth) > 36 else None
+    net_worth_5y = net_worth[60] if len(net_worth) > 60 else None
+    net_worth_10y = net_worth[120] if len(net_worth) > 120 else None
+
+    if savings_2y is not None:
+        stats_text += f"Year 2:  Savings £{int(savings_2y):,}\n"
+    if savings_3y is not None:
+        stats_text += f"Year 3:  Savings £{int(savings_3y):,}, Net Worth £{int(net_worth_3y):,}\n"
+    if savings_5y is not None:
+        stats_text += f"Year 5:  Savings £{int(savings_5y):,}, Net Worth £{int(net_worth_5y):,}\n"
+    if savings_10y is not None:
+        stats_text += f"Year 10: Savings £{int(savings_10y):,}, Net Worth £{int(net_worth_10y):,}"
+
+    fig.text(0.02, 0.98, stats_text, fontsize=10, fontfamily='monospace', va='top')
+
+    # Main balance plot
+    ax1 = fig.add_subplot(gs[1])
+    ax1.plot(years, mortgage_balance, label='Mortgage Balance', color='red')
+    ax1.plot(years, savings_balance, label='Savings Balance', color='green')
+    ax1.plot(years, net_worth, label='Net Worth', color='blue', linestyle='--', linewidth=2)
+    ax1.set_ylabel('Amount')
+    ax1.set_title('Evolution of Mortgage, Savings and Net Worth Over Time')
+    ax1.grid(True, linestyle='--', alpha=0.7)
+    ax1.legend()
+
+    # Monthly payments plot
+    ax2 = fig.add_subplot(gs[2], sharex=ax1)
+    width = 0.08
+    interest_paid = [data['interest_paid'] for data in results['month_data']]
+    principal_paid = [data['monthly_payment'] - data['interest_paid'] for data in results['month_data']]
+    ax2.bar(years, interest_paid, width, label="Interest", color="red", alpha=0.6)
+    ax2.bar(years, principal_paid, width, bottom=interest_paid, label="Principal", color="blue", alpha=0.6)
+    ax2.set_ylabel("Monthly Payment")
+    ax2.grid(True, linestyle="--", alpha=0.7)
+    ax2.legend()
+
+    # Monthly savings plot
+    ax3 = fig.add_subplot(gs[3], sharex=ax1)
+    monthly_savings_data = [
+        monthly_savings + (max(0, typical_payment - data['monthly_payment']) if typical_payment > 0 else 0)
+        for data in results['month_data']
+    ]
+    ax3.bar(years, monthly_savings_data, width=0.08, color="green", alpha=0.6, label="Monthly Savings")
+    ax3.set_ylabel("Monthly Savings")
+    ax3.grid(True, linestyle="--", alpha=0.7)
+    ax3.legend()
+
+    # Interest comparison plot
+    ax4 = fig.add_subplot(gs[4], sharex=ax1)
+    interest_paid = [-data['interest_paid'] for data in results['month_data']]
+    interest_received = [data['savings_interest'] for data in results['month_data']]
+    ax4.bar(years, interest_paid, width, label="Interest Paid", color="red", alpha=0.6)
+    ax4.bar(years, interest_received, width, label="Interest Received", color="green", alpha=0.6)
+    ax4.set_xlabel("Years")
+    ax4.set_ylabel("Monthly Interest")
+    ax4.grid(True, linestyle="--", alpha=0.7)
+    ax4.legend()
+
+    # Format axes
+    def format_pounds(x, p):
+        return f"£{int(x):,}"
+
+    for ax in [ax1, ax2, ax3, ax4]:
+        ax.yaxis.set_major_formatter(plt.FuncFormatter(format_pounds))
+
+    # Set x-axis limits and ticks
+    max_year = max(years)
+    ax1.set_xlim(-0.5, max_year + 0.5)
+    ax1.xaxis.set_major_locator(plt.MultipleLocator(1))
+    ax1.xaxis.set_major_formatter(plt.FormatStrFormatter("%d"))
+
+    # Adjust layout
+    plt.tight_layout()
+    plt.subplots_adjust(top=0.95)
+
+    # Display the figure in Streamlit
+    st.pyplot(fig)
+    plt.close()
+
+    # Display summary statistics
+    st.subheader("Summary Statistics")
+    last_month = results["month_data"][-1]
+    
+    col1, col2 = st.columns(2)
+    with col1:
+        st.metric("Final Mortgage Balance", f"£{last_month['principal_end']:,.2f}")
+        st.metric("Final Savings Balance", f"£{last_month['savings_balance_end']:,.2f}")
+    with col2:
+        net_worth = last_month['savings_balance_end'] - last_month['principal_end'] + asset_value
+        st.metric("Final Net Worth", f"£{net_worth:,.2f}")
+        if "mortgage_paid_off_month" in results:
+            months = results["mortgage_paid_off_month"]
+            st.metric("Mortgage Paid Off After", f"{months} months (Year {months/12:.1f})")
+
+    # Display warnings at the bottom
+    if results["warnings"]:
+        st.markdown("---")  # Add a separator
+        st.subheader("Simulation Notes and Warnings")
+        for warning in results["warnings"]:
+            if warning.startswith("Note:"):
+                st.info(warning)
+            elif warning.startswith("Info:"):
+                st.info(warning)
+            else:
+                st.warning(warning)
+
+if __name__ == "__main__":
+    main() 
