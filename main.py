@@ -1,4 +1,10 @@
-import math
+import sys
+
+# Only use Agg backend during tests
+if 'pytest' in sys.modules:
+    import matplotlib
+    matplotlib.use('Agg')
+
 import matplotlib.pyplot as plt
 import numpy as np
 import itertools
@@ -238,28 +244,9 @@ def handle_payment_excess(
     return adjusted_payment, savings_balance, None
 
 
-def update_savings_balance(
-    savings_balance: float,
-    monthly_savings_contribution: float,
-    typical_payment: float,
-    base_payment: float,
-    monthly_savings_rate: float
-) -> float:
-    """
-    Update savings balance with contributions and interest.
-    """
-    # 1. Add monthly savings contribution
-    balance = savings_balance + monthly_savings_contribution
-    
-    # 2. If monthly payment is less than typical payment, add difference to savings
-    if typical_payment > 0 and base_payment < typical_payment:
-        payment_difference = typical_payment - base_payment
-        balance += payment_difference
-        
-    # 3. Apply savings interest
-    balance = balance * (1 + monthly_savings_rate)
-    
-    return balance
+def monthly_rate(annual_rate: float) -> float:
+    """Convert annual rate in percentage to monthly rate in decimal."""
+    return annual_rate / 100.0 / 12.0
 
 
 def record_month_data(
@@ -494,10 +481,7 @@ def simulate_mortgage(
     # Savings account state
     savings_balance = initial_savings
 
-    # Helper function to get a monthly interest rate from an annual rate
-    def monthly_rate(annual_rate):
-        return annual_rate / 100.0 / 12.0
-
+    # Main simulation loop
     for m in range(total_months):
         # Determine whether we are in fixed period or variable rate period
         if m < fixed_term_months:
@@ -559,6 +543,7 @@ def simulate_mortgage(
         interest_for_month = principal * monthly_mortgage_rate
 
         base_payment = current_monthly_payment if principal > 0 else 0
+        payment_difference = max(0, typical_payment - base_payment) if typical_payment > 0 else 0
 
         # Handle total payment and any excess
         total_payment = base_payment + overpayment
@@ -603,7 +588,8 @@ def simulate_mortgage(
             "annual_mortgage_rate": annual_mortgage_rate,
             "monthly_interest_rate": monthly_mortgage_rate,
             "annual_savings_rate": annual_savings_rate,
-            "monthly_savings_rate": monthly_savings_rate
+            "monthly_savings_rate": monthly_savings_rate,
+            "payment_difference": payment_difference  # Add this to track the difference
         }
         results["month_data"].append(month_data)
 
@@ -632,6 +618,7 @@ def simulate_mortgage(
             savings_balance
             + savings_interest
             + monthly_savings_contribution
+            + payment_difference  # Add the payment difference to savings
         )
 
     # Add final summary to warnings if mortgage was paid off
@@ -889,7 +876,8 @@ def create_charts(
     typical_payment: float,
 ) -> None:
     """
-    Create and display charts from simulation results.
+    Create charts from simulation results and save them to file.
+    Charts are saved to the data directory with a timestamp.
     """
     # Create lists for plotting
     years = [data['month']/12 for data in results['month_data']]
@@ -902,29 +890,36 @@ def create_charts(
     min_savings_month = savings_balance.index(min_savings)
     min_savings_year = years[min_savings_month]
 
-    # Create figure with stats text and three subplots sharing x axis
-    fig = plt.figure(figsize=(12, 13))
+    # Create figure with stats text and subplots sharing x axis
+    fig = plt.figure(figsize=(12, 16))  # Made taller to accommodate new subplot
 
     # Add stats text at the top
     stats_text = "Net Worth Summary:\n"
+    savings_2y = savings_balance[24] if len(savings_balance) > 24 else None
+    savings_3y = savings_balance[36] if len(savings_balance) > 36 else None
+    savings_5y = savings_balance[60] if len(savings_balance) > 60 else None
+    savings_10y = savings_balance[120] if len(savings_balance) > 120 else None
     net_worth_3y = net_worth[36] if len(net_worth) > 36 else None
     net_worth_5y = net_worth[60] if len(net_worth) > 60 else None
     net_worth_10y = net_worth[120] if len(net_worth) > 120 else None
 
-    if net_worth_3y is not None:
-        stats_text += f"Year 3:  £{int(net_worth_3y):,}\n"
-    if net_worth_5y is not None:
-        stats_text += f"Year 5:  £{int(net_worth_5y):,}\n"
-    if net_worth_10y is not None:
-        stats_text += f"Year 10: £{int(net_worth_10y):,}"
+    if savings_2y is not None:
+        stats_text += f"Year 2:  Savings £{int(savings_2y):,}\n"
+    if savings_3y is not None:
+        stats_text += f"Year 3:  Savings £{int(savings_3y):,}, Net Worth £{int(net_worth_3y):,}\n"
+    if savings_5y is not None:
+        stats_text += f"Year 5:  Savings £{int(savings_5y):,}, Net Worth £{int(net_worth_5y):,}\n"
+    if savings_10y is not None:
+        stats_text += f"Year 10: Savings £{int(savings_10y):,}, Net Worth £{int(net_worth_10y):,}"
 
     fig.text(0.02, 0.98, stats_text, fontsize=10, fontfamily='monospace', va='top')
 
-    # Create subplot grid
-    gs = fig.add_gridspec(4, 1, height_ratios=[0.2, 2, 1, 1])
+    # Create subplot grid with 5 rows (stats text, main plot, and three bar charts)
+    gs = fig.add_gridspec(5, 1, height_ratios=[0.2, 2, 1, 1, 1])
     ax1 = fig.add_subplot(gs[1])
     ax2 = fig.add_subplot(gs[2], sharex=ax1)
     ax3 = fig.add_subplot(gs[3], sharex=ax1)
+    ax4 = fig.add_subplot(gs[4], sharex=ax1)  # New subplot for interest comparison
 
     # Top subplot - Line chart for balances
     ax1.plot(years, mortgage_balance, label='Mortgage Balance', color='red')
@@ -962,7 +957,7 @@ def create_charts(
         ha='left' if x_offset > 0 else 'right'
     )
 
-    # Middle subplot - Stacked bar chart for monthly payments (regular payment only)
+    # Second subplot - Stacked bar chart for monthly payments (regular payment only)
     width = 0.08
     ax2.bar(years, [data['interest_paid'] for data in results['month_data']], width, label="Interest", color="red", alpha=0.6)
     ax2.bar(
@@ -978,7 +973,7 @@ def create_charts(
     ax2.grid(True, linestyle="--", alpha=0.7)
     ax2.legend()
 
-    # Bottom subplot - Bar chart for monthly savings
+    # Third subplot - Bar chart for monthly savings
     ax3.bar(
         years,
         [monthly_savings_contribution + (max(0, typical_payment - data['monthly_payment']) if typical_payment > 0 else 0) for data in results['month_data']],
@@ -987,10 +982,20 @@ def create_charts(
         alpha=0.6,
         label="Monthly Savings",
     )
-    ax3.set_xlabel("Years")
     ax3.set_ylabel("Monthly Savings")
     ax3.grid(True, linestyle="--", alpha=0.7)
     ax3.legend()
+
+    # Fourth subplot - Stacked bar chart for interest paid vs received
+    interest_paid = [-data['interest_paid'] for data in results['month_data']]  # Make interest paid negative
+    interest_received = [data['savings_interest'] for data in results['month_data']]
+    
+    ax4.bar(years, interest_paid, width, label="Interest Paid", color="red", alpha=0.6)
+    ax4.bar(years, interest_received, width, label="Interest Received", color="green", alpha=0.6)
+    ax4.set_xlabel("Years")
+    ax4.set_ylabel("Monthly Interest")
+    ax4.grid(True, linestyle="--", alpha=0.7)
+    ax4.legend()
 
     # Format axes
     def format_pounds(x, p):
@@ -999,6 +1004,7 @@ def create_charts(
     ax1.yaxis.set_major_formatter(plt.FuncFormatter(format_pounds))
     ax2.yaxis.set_major_formatter(plt.FuncFormatter(format_pounds))
     ax3.yaxis.set_major_formatter(plt.FuncFormatter(format_pounds))
+    ax4.yaxis.set_major_formatter(plt.FuncFormatter(format_pounds))
 
     # Set x-axis limits and ticks
     max_year = max(years)
@@ -1009,7 +1015,21 @@ def create_charts(
     # Adjust layout to prevent text overlapping
     plt.tight_layout()
     plt.subplots_adjust(top=0.95)  # Make room for the stats text
-    plt.show()
+
+    # Create data directory if it doesn't exist
+    os.makedirs("data", exist_ok=True)
+    
+    # Save the plot
+    current_time = datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = f"data/mortgage_charts_{current_time}.png"
+    plt.savefig(filename)
+    print(f"Charts saved to: {filename}")
+    
+    # Display the plot if not running tests
+    if 'pytest' not in sys.modules:
+        plt.show()
+    
+    plt.close()
 
 
 def print_debug_info(results: Dict[str, Any], fixed_term_months: int) -> None:

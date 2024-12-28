@@ -4,6 +4,10 @@ import os
 import subprocess
 from pathlib import Path
 
+# Configure matplotlib to use non-interactive backend before any other imports
+import matplotlib
+matplotlib.use('Agg')
+
 # Add the parent directory to the Python path so we can import the main module
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
