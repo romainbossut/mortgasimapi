@@ -607,9 +607,16 @@ def simulate_mortgage(
                 principal, annual_mortgage_rate, months_left
             )
             if new_payment < current_monthly_payment:
+                # Estimate next-month interest portion
+                next_month_interest = principal * (annual_mortgage_rate / 100.0 / 12.0)
+                # Principal portion is new_payment minus interest
+                next_month_principal = new_payment - next_month_interest
+
                 current_monthly_payment = new_payment
                 results["warnings"].append(
-                    f"Info: Reduced monthly payment to {new_payment:.2f} at month {m} due to overpayment"
+                    f"Info: Reduced monthly payment to £{new_payment:.2f} at month {m} "
+                    f"(interest: £{next_month_interest:.2f}, principal: £{next_month_principal:.2f}) "
+                    f"due to overpayment."
                 )
 
         # Update savings with interest and contribution
