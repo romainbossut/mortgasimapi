@@ -4,6 +4,7 @@ from main import simulate_mortgage, create_charts, save_results_to_csv
 import os
 
 def main():
+    st.set_page_config(layout="wide") # Set wide mode
     st.title("Interactive Mortgage Calculator")
     st.write("Adjust the parameters below to see how they affect your mortgage and savings.")
 
@@ -15,7 +16,7 @@ def main():
         mortgage_amount = st.number_input(
             "Mortgage Amount (£)",
             min_value=0.0,
-            value=180000.0,
+            value=187000.0,
             step=1000.0,
             format="%0.2f"
         )
@@ -24,7 +25,7 @@ def main():
             "Term (Years)",
             min_value=1.0,
             max_value=40.0,
-            value=25.0,
+            value=21.0,
             step=1.0,
             format="%0.1f"
         )
@@ -198,16 +199,62 @@ def main():
     ax1.grid(True, linestyle='--', alpha=0.7)
     ax1.legend()
 
+    # Add minimum savings annotation if data available
+    if "min_savings_balance" in results and "min_savings_month" in results:
+        min_savings = results["min_savings_balance"]
+        min_savings_month_idx = results["min_savings_month"] - 1 # Adjust to 0-based index
+        if 0 <= min_savings_month_idx < len(years):
+            min_savings_year = years[min_savings_month_idx]
+            # Smart positioning logic (simplified)
+            x_offset = 0.5
+            y_offset = (ax1.get_ylim()[1] - ax1.get_ylim()[0]) * 0.05 # 5% of y-axis range
+            if min_savings_month_idx == 0: x_offset = 1.0
+            if min_savings_month_idx == len(years) - 1: x_offset = -1.0
+            y_pos = min_savings + y_offset
+            if y_pos < ax1.get_ylim()[0]: y_pos = min_savings + abs(y_offset)
+            
+            ax1.annotate(
+                f'Min Savings: £{int(min_savings):,}\nYear {min_savings_year:.1f}',
+                xy=(min_savings_year, min_savings),
+                xytext=(min_savings_year + x_offset, y_pos),
+                arrowprops=dict(facecolor='black', shrink=0.05, width=1, headwidth=4),
+                bbox=dict(boxstyle='round,pad=0.3', fc='yellow', alpha=0.7),
+                ha='left' if x_offset > 0 else 'right'
+            )
+
     # Monthly payments plot
     ax2 = fig.add_subplot(gs[2], sharex=ax1)
     width = 0.08
+    monthly_payments = [data['monthly_payment'] for data in results['month_data']]
     interest_paid = [data['interest_paid'] for data in results['month_data']]
-    principal_paid = [data['monthly_payment'] - data['interest_paid'] for data in results['month_data']]
+    # Calculate principal paid based on actual monthly payment
+    principal_paid = [mp - ip for mp, ip in zip(monthly_payments, interest_paid)]
+    # Ensure principal paid isn't negative if interest > payment (shouldn't happen with guards)
+    principal_paid = [max(0, p) for p in principal_paid]
+    
     ax2.bar(years, interest_paid, width, label="Interest", color="red", alpha=0.6)
     ax2.bar(years, principal_paid, width, bottom=interest_paid, label="Principal", color="blue", alpha=0.6)
     ax2.set_ylabel("Monthly Payment")
     ax2.grid(True, linestyle="--", alpha=0.7)
     ax2.legend()
+
+    # Add annotations for payment changes
+    previous_payment = None
+    for i, data in enumerate(results["month_data"]):
+        current_payment = data['monthly_payment']
+        if i > 0 and current_payment != previous_payment:
+            year = data['month'] / 12
+            # Annotate at the top of the principal bar
+            annotation_y = interest_paid[i] + principal_paid[i]
+            ax2.annotate(
+                f"£{current_payment:,.0f}",
+                xy=(year, annotation_y),
+                xytext=(year, annotation_y + ax2.get_ylim()[1] * 0.1), # Offset slightly above
+                arrowprops=dict(facecolor='black', shrink=0.05, width=1, headwidth=4),
+                bbox=dict(boxstyle='round,pad=0.3', fc='lightblue', alpha=0.7),
+                ha='center'
+            )
+        previous_payment = current_payment
 
     # Monthly savings plot
     ax3 = fig.add_subplot(gs[3], sharex=ax1)
@@ -235,8 +282,11 @@ def main():
     def format_pounds(x, p):
         return f"£{int(x):,}"
 
-    for ax in [ax1, ax2, ax3, ax4]:
-        ax.yaxis.set_major_formatter(plt.FuncFormatter(format_pounds))
+    ax1.yaxis.set_major_formatter(plt.FuncFormatter(format_pounds))
+    ax1.yaxis.set_major_locator(plt.MultipleLocator(50000)) # Set Y-axis ticks to 50k intervals
+    ax2.yaxis.set_major_formatter(plt.FuncFormatter(format_pounds))
+    ax3.yaxis.set_major_formatter(plt.FuncFormatter(format_pounds))
+    ax4.yaxis.set_major_formatter(plt.FuncFormatter(format_pounds))
 
     # Set x-axis limits and ticks
     max_year = max(years)
@@ -251,6 +301,24 @@ def main():
     # Display the figure in Streamlit
     st.pyplot(fig)
     plt.close()
+
+    # --- New Mortgage Balance Only Chart ---
+    st.subheader("Mortgage Balance Detail")
+    fig_mortgage, ax_mortgage = plt.subplots(figsize=(12, 6))
+    ax_mortgage.plot(years, mortgage_balance, label='Mortgage Balance', color='red')
+    ax_mortgage.set_xlabel("Years")
+    ax_mortgage.set_ylabel("Amount (£)")
+    ax_mortgage.set_title("Mortgage Balance Over Time")
+    ax_mortgage.grid(True, linestyle='--', alpha=0.7)
+    ax_mortgage.legend()
+    ax_mortgage.yaxis.set_major_formatter(plt.FuncFormatter(format_pounds))
+    ax_mortgage.set_xlim(-0.5, max_year + 0.5)
+    ax_mortgage.xaxis.set_major_locator(plt.MultipleLocator(1))
+    ax_mortgage.xaxis.set_major_formatter(plt.FormatStrFormatter("%d"))
+    plt.tight_layout()
+    st.pyplot(fig_mortgage)
+    plt.close()
+    # --- End New Chart ---
 
     # Display summary statistics
     st.subheader("Summary Statistics")

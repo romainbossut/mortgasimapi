@@ -672,9 +672,7 @@ def save_chart_data_to_json(
         "overpayment": [round(data["overpayment"], 2) for data in results["month_data"]]
     }
     monthly_savings = [
-        round(monthly_savings_contribution + 
-              (max(0, typical_payment - data["monthly_payment"]) if typical_payment > 0 else 0),
-              2)
+        round(monthly_savings_contribution + data["payment_difference"], 2)
         for data in results["month_data"]
     ]
 
@@ -987,7 +985,7 @@ def create_charts(
     # Third subplot - Bar chart for monthly savings
     ax3.bar(
         years,
-        [monthly_savings_contribution + (data['payment_difference'] if typical_payment > 0 else 0) for data in results['month_data']],
+        [monthly_savings_contribution + data['payment_difference'] for data in results['month_data']],
         width=0.08,
         color="green",
         alpha=0.6,
