@@ -28,7 +28,8 @@ def test_basic_command_execution():
         "--mortgage-amount", "200000",
         "--term-years", "25",
         "--fixed-rate", "2.99",
-        "--fixed-term-months", "24"
+        "--fixed-term-months", "24",
+        "-v"
     ]
     
     result = run_script(args)
@@ -127,7 +128,8 @@ def test_full_scenario_with_overpayments():
         "--initial-savings", "100000",
         "--typical-payment", "1500",
         "--asset-value", "350000",
-        "--overpayments", "24:20000,36:15000"
+        "--overpayments", "24:20000,36:15000",
+        "-v"
     ]
     
     result = run_script(args)
@@ -222,7 +224,8 @@ def test_zero_interest_after_fixed():
         "--term-years", "25",
         "--fixed-rate", "2.99",
         "--fixed-term-months", "24",
-        "--variable-rate", "0.0"  # Zero interest after fixed period
+        "--variable-rate", "0.0",  # Zero interest after fixed period
+        "-v"  # Add verbose flag to ensure debug output is present
     ]
     
     result = run_script(args)
@@ -296,7 +299,7 @@ def test_csv_output():
             "Monthly Payment", "Interest Paid", "Principal Repaid",
             "Overpayment", "Annual Mortgage Rate", "Monthly Interest Rate",
             "Savings Balance", "Annual Savings Rate", "Monthly Savings Rate",
-            "Net Worth"
+            "Net Worth", "Payment Difference"
         ]
         assert headers == expected_headers, "CSV headers do not match expected format"
         

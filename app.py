@@ -14,7 +14,7 @@ def main():
         mortgage_amount = st.number_input(
             "Mortgage Amount (£)",
             min_value=0.0,
-            value=150000.0,
+            value=180000.0,
             step=1000.0,
             format="%0.2f"
         )
@@ -32,7 +32,7 @@ def main():
             "Fixed Interest Rate (%)",
             min_value=0.0,
             max_value=15.0,
-            value=3.0,
+            value=1.65,
             step=0.1,
             format="%0.2f"
         )
@@ -41,7 +41,7 @@ def main():
             "Fixed Term (Months)",
             min_value=0,
             max_value=int(term_years * 12),
-            value=24,
+            value=12,
             step=1
         )
         
@@ -60,7 +60,7 @@ def main():
             "Savings Interest Rate (%)",
             min_value=0.0,
             max_value=15.0,
-            value=4.0,
+            value=4.30,
             step=0.1,
             format="%0.2f"
         )
@@ -259,6 +259,9 @@ def main():
     with col1:
         st.metric("Final Mortgage Balance", f"£{last_month['principal_end']:,.2f}")
         st.metric("Final Savings Balance", f"£{last_month['savings_balance_end']:,.2f}")
+        if "min_savings_balance" in results:
+            min_savings_month = results["min_savings_month"]
+            st.metric("Lowest Savings Balance", f"£{results['min_savings_balance']:,.2f}", delta=f"Month {min_savings_month} (Year {min_savings_month/12:.1f})", delta_color="off")
     with col2:
         net_worth = last_month['savings_balance_end'] - last_month['principal_end'] + asset_value
         st.metric("Final Net Worth", f"£{net_worth:,.2f}")
