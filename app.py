@@ -1,6 +1,7 @@
 import streamlit as st
 import matplotlib.pyplot as plt
-from main import simulate_mortgage, create_charts
+from main import simulate_mortgage, create_charts, save_results_to_csv
+import os
 
 def main():
     st.title("Interactive Mortgage Calculator")
@@ -76,7 +77,7 @@ def main():
         initial_savings = st.number_input(
             "Initial Savings (£)",
             min_value=0.0,
-            value=150000.0,
+            value=170000.0,
             step=1000.0,
             format="%0.2f"
         )
@@ -268,6 +269,18 @@ def main():
         if "mortgage_paid_off_month" in results:
             months = results["mortgage_paid_off_month"]
             st.metric("Mortgage Paid Off After", f"{months} months (Year {months/12:.1f})")
+
+    # Generate and offer CSV download
+    csv_file_path = save_results_to_csv(results, asset_value)
+    with open(csv_file_path, "r") as f:
+        csv_data = f.read()
+    
+    st.download_button(
+        label="Download Simulation Data as CSV",
+        data=csv_data,
+        file_name=os.path.basename(csv_file_path),
+        mime="text/csv",
+    )
 
     # Display warnings at the bottom
     if results["warnings"]:

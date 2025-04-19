@@ -838,8 +838,8 @@ def parse_args() -> Any:
     parser.add_argument(
         "--initial-savings",
         type=float,
-        default=150000.0,
-        help="Initial savings balance (default: 150000.0)",
+        default=170000.0,
+        help="Initial savings balance (default: 170000.0)",
     )
     parser.add_argument(
         "--typical-payment",
