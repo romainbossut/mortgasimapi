@@ -1,7 +1,10 @@
-import streamlit as st
-import matplotlib.pyplot as plt
-from main import simulate_mortgage, save_results_to_csv
 import os
+
+import matplotlib.pyplot as plt
+import streamlit as st
+
+from main import save_results_to_csv, simulate_mortgage
+
 
 def main():
     st.set_page_config(layout="wide") # Set wide mode
@@ -20,7 +23,7 @@ def main():
             step=1000.0,
             format="%0.2f"
         )
-        
+
         term_years = st.number_input(
             "Term (Years)",
             min_value=1.0,
@@ -29,7 +32,7 @@ def main():
             step=1.0,
             format="%0.1f"
         )
-        
+
         fixed_rate = st.number_input(
             "Fixed Interest Rate (%)",
             min_value=0.0,
@@ -38,7 +41,7 @@ def main():
             step=0.1,
             format="%0.2f"
         )
-        
+
         fixed_term_months = st.number_input(
             "Fixed Term (Months)",
             min_value=0,
@@ -46,7 +49,7 @@ def main():
             value=12,
             step=1
         )
-        
+
         variable_rate = st.number_input(
             "Variable Rate after Fixed Term (%)",
             min_value=0.0,
@@ -66,7 +69,7 @@ def main():
             step=0.1,
             format="%0.2f"
         )
-        
+
         monthly_savings = st.number_input(
             "Monthly Savings Contribution (£)",
             min_value=0.0,
@@ -74,7 +77,7 @@ def main():
             step=100.0,
             format="%0.2f"
         )
-        
+
         initial_savings = st.number_input(
             "Initial Savings (£)",
             min_value=0.0,
@@ -82,7 +85,7 @@ def main():
             step=1000.0,
             format="%0.2f"
         )
-        
+
         typical_payment = st.number_input(
             "Typical Monthly Payment (£)",
             min_value=0.0,
@@ -90,7 +93,7 @@ def main():
             step=10.0,
             format="%0.2f"
         )
-        
+
         asset_value = st.number_input(
             "Property Value (£)",
             min_value=0.0,
@@ -112,7 +115,7 @@ def main():
             )
         else:
             max_payment = float('inf')
-        
+
         overpayments = st.text_input(
             "Overpayments (format: 'month:amount,month:amount')",
             value="",
@@ -125,7 +128,7 @@ def main():
     savings_rate_curve = [savings_rate for _ in range(term_months)]
 
     # Parse overpayments
-    overpayment_schedule = {m: 0 for m in range(term_months)}
+    overpayment_schedule = dict.fromkeys(range(term_months), 0)
     if overpayments:
         pairs = overpayments.split(",")
         for pair in pairs:
@@ -157,17 +160,17 @@ def main():
 
     # Display charts
     st.subheader("Charts")
-    
+
     # Create lists for plotting
     years = [data['month']/12 for data in results['month_data']]
     mortgage_balance = [data['principal_end'] for data in results['month_data']]
     savings_balance = [data['savings_balance_end'] for data in results['month_data']]
-    net_worth = [s - m + asset_value for s, m in zip(savings_balance, mortgage_balance)]
+    net_worth = [s - m + asset_value for s, m in zip(savings_balance, mortgage_balance, strict=False)]
 
     # Create figure and subplots
     fig = plt.figure(figsize=(12, 16))
     gs = fig.add_gridspec(5, 1, height_ratios=[0.2, 2, 1, 1, 1])
-    
+
     # Stats text at the top
     stats_text = "Net Worth Summary:\n"
     savings_2y = savings_balance[24] if len(savings_balance) > 24 else None
@@ -215,7 +218,7 @@ def main():
             y_pos = min_savings + y_offset
             if y_pos < ax1.get_ylim()[0]:
                 y_pos = min_savings + abs(y_offset)
-            
+
             ax1.annotate(
                 f'Min Savings: £{int(min_savings):,}\nYear {min_savings_year:.1f}',
                 xy=(min_savings_year, min_savings),
@@ -231,10 +234,10 @@ def main():
     monthly_payments = [data['monthly_payment'] for data in results['month_data']]
     interest_paid = [data['interest_paid'] for data in results['month_data']]
     # Calculate principal paid based on actual monthly payment
-    principal_paid = [mp - ip for mp, ip in zip(monthly_payments, interest_paid)]
+    principal_paid = [mp - ip for mp, ip in zip(monthly_payments, interest_paid, strict=False)]
     # Ensure principal paid isn't negative if interest > payment (shouldn't happen with guards)
     principal_paid = [max(0, p) for p in principal_paid]
-    
+
     ax2.bar(years, interest_paid, width, label="Interest", color="red", alpha=0.6)
     ax2.bar(years, principal_paid, width, bottom=interest_paid, label="Principal", color="blue", alpha=0.6)
     ax2.set_ylabel("Monthly Payment")
@@ -326,7 +329,7 @@ def main():
     # Display summary statistics
     st.subheader("Summary Statistics")
     last_month = results["month_data"][-1]
-    
+
     col1, col2 = st.columns(2)
     with col1:
         st.metric("Final Mortgage Balance", f"£{last_month['principal_end']:,.2f}")
@@ -343,9 +346,9 @@ def main():
 
     # Generate and offer CSV download
     csv_file_path = save_results_to_csv(results, asset_value)
-    with open(csv_file_path, "r") as f:
+    with open(csv_file_path) as f:
         csv_data = f.read()
-    
+
     st.download_button(
         label="Download Simulation Data as CSV",
         data=csv_data,
@@ -358,12 +361,10 @@ def main():
         st.markdown("---")  # Add a separator
         st.subheader("Simulation Notes and Warnings")
         for warning in results["warnings"]:
-            if warning.startswith("Note:"):
-                st.info(warning)
-            elif warning.startswith("Info:"):
+            if warning.startswith("Note:") or warning.startswith("Info:"):
                 st.info(warning)
             else:
                 st.warning(warning)
 
 if __name__ == "__main__":
-    main() 
+    main()

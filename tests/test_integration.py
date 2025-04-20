@@ -1,10 +1,11 @@
-import sys
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 # Configure matplotlib to use non-interactive backend before any other imports
 import matplotlib
+
 matplotlib.use('Agg')
 
 # Add the parent directory to the Python path so we can import the main module
@@ -30,17 +31,17 @@ def test_basic_command_execution():
         "--fixed-term-months", "24",
         "-v"
     ]
-    
+
     result = run_script(args)
-    
+
     # Check successful execution
     assert result.returncode == 0
-    
+
     # Check expected output elements
     assert "Payment components around fixed-to-variable rate transition" in result.stdout
     assert "Chart data saved to:" in result.stdout
     assert "Last month data:" in result.stdout
-    
+
     # Verify no error messages
     assert not result.stderr
 
@@ -60,7 +61,7 @@ def test_invalid_negative_arguments():
             "error_message": "term years cannot be negative"
         }
     ]
-    
+
     for case in test_cases:
         args = [
             "--mortgage-amount", "200000",
@@ -68,13 +69,13 @@ def test_invalid_negative_arguments():
             "--fixed-rate", "0.0299",
             "--fixed-term-months", "24"
         ]
-        
+
         # Replace the relevant argument with negative value
         arg_index = args.index(case["args"][0])
         args[arg_index + 1] = case["args"][1]
-        
+
         result = run_script(args)
-        
+
         # Check error handling
         assert result.returncode != 0
         assert case["error_message"].lower() in result.stderr.lower()
@@ -95,7 +96,7 @@ def test_invalid_argument_formats():
             "error_message": "invalid float value: 'abc'"
         }
     ]
-    
+
     for case in test_cases:
         args = [
             "--mortgage-amount", "200000",
@@ -103,13 +104,13 @@ def test_invalid_argument_formats():
             "--fixed-rate", "0.0299",
             "--fixed-term-months", "24"
         ]
-        
+
         # Replace the relevant argument with invalid format
         arg_index = args.index(case["args"][0])
         args[arg_index + 1] = case["args"][1]
-        
+
         result = run_script(args)
-        
+
         # Check error handling
         assert result.returncode != 0
         assert case["error_message"].lower() in result.stderr.lower()
@@ -130,24 +131,24 @@ def test_full_scenario_with_overpayments():
         "--overpayments", "24:20000,36:15000",
         "-v"
     ]
-    
+
     result = run_script(args)
-    
+
     # Check successful execution
     assert result.returncode == 0
-    
+
     # Check expected output elements
     assert "Manual Overpayment Schedule:" in result.stdout
     assert "Month 24 (Year 2.0)" in result.stdout  # First overpayment
     assert "Month 36 (Year 3.0)" in result.stdout  # Second overpayment
-    
+
     # Check for key simulation results
     assert "Payment components around fixed-to-variable rate transition" in result.stdout
     assert "Chart data saved to:" in result.stdout
-    
+
     # Verify the simulation completed successfully
     assert "Last month data:" in result.stdout
-    
+
     # Verify no error messages
     assert not result.stderr
 
@@ -157,7 +158,7 @@ def test_missing_required_arguments():
     result = run_script([])
     assert result.returncode != 0
     assert "the following arguments are required" in result.stderr.lower()
-    
+
     # Test with partial arguments
     partial_args = [
         "--mortgage-amount", "200000",
@@ -191,17 +192,17 @@ def test_argument_validation():
             "error": "initial savings cannot be negative"
         }
     ]
-    
+
     base_args = [
         "--mortgage-amount", "200000",
         "--term-years", "25",
         "--fixed-rate", "0.0299",
         "--fixed-term-months", "24"
     ]
-    
+
     for case in test_cases:
         args = list(base_args)  # Create a copy of base_args
-        
+
         # Replace or add the invalid argument
         arg_name = case["args"][0]
         if arg_name in args:
@@ -209,9 +210,9 @@ def test_argument_validation():
             args[idx + 1] = case["args"][1]
         else:
             args.extend(case["args"])
-        
+
         result = run_script(args)
-        
+
         # Check error handling
         assert result.returncode != 0
         assert case["error"].lower() in result.stderr.lower()
@@ -226,16 +227,16 @@ def test_zero_interest_after_fixed():
         "--variable-rate", "0.0",  # Zero interest after fixed period
         "-v"  # Add verbose flag to ensure debug output is present
     ]
-    
+
     result = run_script(args)
     assert result.returncode == 0
-    
+
     # Extract payment data after fixed period
     fixed_period_end = False
     interest = None
     principal = None
     payment = None
-    
+
     lines = result.stdout.split('\n')
     for i, line in enumerate(lines):
         if "Month 25:" in line:  # First month after fixed period
@@ -248,12 +249,12 @@ def test_zero_interest_after_fixed():
                     principal = float(lines[j].split('£')[1])
                 elif "Monthly Payment:" in lines[j]:
                     payment = float(lines[j].split('£')[1])
-    
+
     assert fixed_period_end, "Could not find data after fixed period"
     assert interest is not None, "Could not find interest payment data"
     assert principal is not None, "Could not find principal payment data"
     assert payment is not None, "Could not find monthly payment data"
-    
+
     # Now verify the payment components
     assert interest == 0.0, f"Interest payment should be zero after fixed period, got £{interest:.2f}"
     assert principal > 0, "Principal payment should be positive after fixed period"
@@ -272,26 +273,26 @@ def test_csv_output():
         "--initial-savings", "100000",
         "--asset-value", "350000"
     ]
-    
+
     result = run_script(args)
     assert result.returncode == 0
-    
+
     # Find the CSV file path
     csv_file = None
     for line in result.stdout.split('\n'):
         if "CSV data saved to:" in line:
             csv_file = line.split(": ")[1].strip()
             break
-    
+
     assert csv_file is not None, "Could not find CSV file path in output"
-    
+
     # Read and verify CSV content
     import csv
     with open(csv_file) as f:
         reader = csv.reader(f)
         headers = next(reader)  # Get headers
         first_row = next(reader)  # Get first data row
-        
+
         # Verify headers
         expected_headers = [
             "Month", "Year", "Principal Start", "Principal End",
@@ -301,18 +302,18 @@ def test_csv_output():
             "Net Worth", "Payment Difference"
         ]
         assert headers == expected_headers, "CSV headers do not match expected format"
-        
+
         # Verify first row data types and ranges
         assert int(float(first_row[0])) == 1, "First month should be 1"
         assert 0 < float(first_row[1]) < 0.1, "First year should be close to 0"
         assert float(first_row[2]) == 300000, "Initial principal should match mortgage amount"
         assert 0 <= float(first_row[8]) <= 100, "Annual mortgage rate should be between 0 and 100 percent"
         assert float(first_row[7]) == 0, "No overpayment expected in first month"
-        
+
         # Read all rows to verify completeness
         rows = list(reader)
         assert len(rows) == 299, "Expected 300 rows total (25 years * 12 months)"
-        
+
         # Verify last row
         last_row = rows[-1]
         assert float(last_row[3]) == 0, "Principal should be zero at end of term"
