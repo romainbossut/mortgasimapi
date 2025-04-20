@@ -1,6 +1,6 @@
 import streamlit as st
 import matplotlib.pyplot as plt
-from main import simulate_mortgage, create_charts, save_results_to_csv
+from main import simulate_mortgage, save_results_to_csv
 import os
 
 def main():
@@ -208,10 +208,13 @@ def main():
             # Smart positioning logic (simplified)
             x_offset = 0.5
             y_offset = (ax1.get_ylim()[1] - ax1.get_ylim()[0]) * 0.05 # 5% of y-axis range
-            if min_savings_month_idx == 0: x_offset = 1.0
-            if min_savings_month_idx == len(years) - 1: x_offset = -1.0
+            if min_savings_month_idx == 0:
+                x_offset = 1.0
+            if min_savings_month_idx == len(years) - 1:
+                x_offset = -1.0
             y_pos = min_savings + y_offset
-            if y_pos < ax1.get_ylim()[0]: y_pos = min_savings + abs(y_offset)
+            if y_pos < ax1.get_ylim()[0]:
+                y_pos = min_savings + abs(y_offset)
             
             ax1.annotate(
                 f'Min Savings: £{int(min_savings):,}\nYear {min_savings_year:.1f}',

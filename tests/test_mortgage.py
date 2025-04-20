@@ -1,4 +1,3 @@
-import pytest
 import sys
 import os
 from math import isclose

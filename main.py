@@ -6,8 +6,6 @@ if 'pytest' in sys.modules:
     matplotlib.use('Agg')
 
 import matplotlib.pyplot as plt
-import numpy as np
-import itertools
 import json
 from datetime import datetime
 import os
@@ -410,7 +408,6 @@ def simulate_mortgage(
 
     # Initialize state variables
     principal = mortgage_amount
-    current_month = 0
     total_months = term_months
 
     # Determine initial monthly payment for the fixed period
