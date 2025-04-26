@@ -121,6 +121,15 @@ def main():
             value="",
             help="Example: '18:20000,19:10000' for £20,000 in month 18 and £10,000 in month 19"
         )
+        
+        # Add input for years to show after payoff
+        show_years_after_payoff = st.number_input(
+            "Years to show after mortgage is paid off",
+            min_value=0,
+            max_value=20,
+            value=5,
+            step=1
+        )
 
     # Convert parameters
     term_months = int(term_years * 12)
@@ -166,6 +175,20 @@ def main():
     mortgage_balance = [data['principal_end'] for data in results['month_data']]
     savings_balance = [data['savings_balance_end'] for data in results['month_data']]
     net_worth = [s - m + asset_value for s, m in zip(savings_balance, mortgage_balance, strict=False)]
+
+    # Determine chart display limit based on mortgage payoff date
+    display_limit_month = term_months  # Default to full term
+    if "mortgage_paid_off_month" in results:
+        payoff_month = results["mortgage_paid_off_month"]
+        # Add the extra years after payoff (convert to months)
+        display_limit_month = min(term_months, payoff_month + (show_years_after_payoff * 12))
+    
+    # Limit the data to be displayed based on the calculated limit
+    if display_limit_month < term_months:
+        years = years[:display_limit_month]
+        mortgage_balance = mortgage_balance[:display_limit_month]
+        savings_balance = savings_balance[:display_limit_month]
+        net_worth = net_worth[:display_limit_month]
 
     # Create figure and subplots
     fig = plt.figure(figsize=(12, 16))
@@ -231,8 +254,8 @@ def main():
     # Monthly payments plot
     ax2 = fig.add_subplot(gs[2], sharex=ax1)
     width = 0.08
-    monthly_payments = [data['monthly_payment'] for data in results['month_data']]
-    interest_paid = [data['interest_paid'] for data in results['month_data']]
+    monthly_payments = [data['monthly_payment'] for data in results['month_data'][:display_limit_month]]
+    interest_paid = [data['interest_paid'] for data in results['month_data'][:display_limit_month]]
     # Calculate principal paid based on actual monthly payment
     principal_paid = [mp - ip for mp, ip in zip(monthly_payments, interest_paid, strict=False)]
     # Ensure principal paid isn't negative if interest > payment (shouldn't happen with guards)
@@ -266,7 +289,7 @@ def main():
     ax3 = fig.add_subplot(gs[3], sharex=ax1)
     monthly_savings_data = [
         monthly_savings + (max(0, typical_payment - data['monthly_payment']) if typical_payment > 0 else 0)
-        for data in results['month_data']
+        for data in results['month_data'][:display_limit_month]
     ]
     ax3.bar(years, monthly_savings_data, width=0.08, color="green", alpha=0.6, label="Monthly Savings")
     ax3.set_ylabel("Monthly Savings")
@@ -275,8 +298,8 @@ def main():
 
     # Interest comparison plot
     ax4 = fig.add_subplot(gs[4], sharex=ax1)
-    interest_paid = [-data['interest_paid'] for data in results['month_data']]
-    interest_received = [data['savings_interest'] for data in results['month_data']]
+    interest_paid = [-data['interest_paid'] for data in results['month_data'][:display_limit_month]]
+    interest_received = [data['savings_interest'] for data in results['month_data'][:display_limit_month]]
     ax4.bar(years, interest_paid, width, label="Interest Paid", color="red", alpha=0.6)
     ax4.bar(years, interest_received, width, label="Interest Received", color="green", alpha=0.6)
     ax4.set_xlabel("Years")
@@ -318,7 +341,7 @@ def main():
     ax_mortgage.grid(True, linestyle='--', alpha=0.7)
     ax_mortgage.legend()
     ax_mortgage.yaxis.set_major_formatter(plt.FuncFormatter(format_pounds))
-    ax_mortgage.set_xlim(-0.5, max_year + 0.5)
+    ax_mortgage.set_xlim(-0.5, max(years) + 0.5)
     ax_mortgage.xaxis.set_major_locator(plt.MultipleLocator(1))
     ax_mortgage.xaxis.set_major_formatter(plt.FormatStrFormatter("%d"))
     plt.tight_layout()
@@ -330,10 +353,19 @@ def main():
     st.subheader("Summary Statistics")
     last_month = results["month_data"][-1]
 
+    # Calculate the balance due at the end of fixed term
+    fixed_term_end_balance = None
+    if fixed_term_months > 0 and fixed_term_months <= len(results["month_data"]):
+        fixed_term_end_balance = results["month_data"][fixed_term_months - 1]["principal_end"]
+
     col1, col2 = st.columns(2)
     with col1:
         st.metric("Final Mortgage Balance", f"£{last_month['principal_end']:,.2f}")
         st.metric("Final Savings Balance", f"£{last_month['savings_balance_end']:,.2f}")
+        if fixed_term_end_balance is not None:
+            st.metric("Balance Due at End of Fixed Term", f"£{fixed_term_end_balance:,.2f}", 
+                      delta=f"After {fixed_term_months} months (Year {fixed_term_months/12:.1f})", 
+                      delta_color="off")
         if "min_savings_balance" in results:
             min_savings_month = results["min_savings_month"]
             st.metric("Lowest Savings Balance", f"£{results['min_savings_balance']:,.2f}", delta=f"Month {min_savings_month} (Year {min_savings_month/12:.1f})", delta_color="off")
