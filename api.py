@@ -341,8 +341,7 @@ async def get_sample_request():
     Get a sample simulation request with realistic default values
     
     This endpoint returns a properly formatted sample request that can be used
-    as a starting point for customization or testing. The sample includes an
-    overpayment schedule to demonstrate how overpayments work.
+    as a starting point for customization or testing.
     """
     return SimulationRequest(
         mortgage=MortgageParameters(
@@ -360,8 +359,7 @@ async def get_sample_request():
         simulation=SimulationParameters(
             typical_payment=878.0,
             asset_value=360000.0,
-            show_years_after_payoff=5,
-            overpayments="18:20000,24:15000,36:10000"
+            show_years_after_payoff=5
         )
     )
 
