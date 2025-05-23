@@ -12,6 +12,7 @@ from datetime import datetime
 import os
 
 from fastapi import FastAPI, HTTPException, Query
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field, validator
 import uvicorn
@@ -30,6 +31,15 @@ app = FastAPI(
     version="1.0.0",
     docs_url="/docs",
     redoc_url="/redoc",
+)
+
+# Add CORS middleware to allow localhost and 127.0.0.1 on any port
+app.add_middleware(
+    CORSMiddleware,
+    allow_origin_regex=r"^https?://((localhost|127\.0\.0\.1)(:\d+)?|(www\.)?mortgasim\.com)$",
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 
