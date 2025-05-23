@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.coverage
+.vscode/
+.git/
+tests/
+*.log
+.env
+.env.local
+data/
+.ruff_cache/
+README.md 
