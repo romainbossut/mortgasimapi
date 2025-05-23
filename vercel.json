@@ -15,5 +15,10 @@
   "env": {
     "PYTHONPATH": "."
   },
-  "installCommand": "pip install -r requirements.txt"
+  "installCommand": "pip install -r requirements.txt",
+  "git": {
+    "deploymentEnabled": {
+      "main": true
+    }
+  }
 } 
