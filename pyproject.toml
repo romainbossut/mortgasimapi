@@ -1,0 +1,124 @@
+[project]
+name = "mortgage-simulator"
+version = "0.1.0"
+description = "Mortgage and savings simulator"
+authors = [
+    {name = "Romain"}
+]
+requires-python = ">=3.8"
+
+[tool.ruff]
+# Target Python version
+target-version = "py38"
+
+# Line length configuration
+line-length = 100
+
+# Files to exclude from linting
+exclude = [
+    ".git",
+    ".mypy_cache",
+    ".ruff_cache",
+    ".venv",
+    "__pypackages__",
+    "_build",
+    "build",
+    "dist",
+    "venv",
+]
+
+[tool.ruff.lint]
+# Enable pycodestyle (E), Pyflakes (F), isort (I), and more
+select = ["E", "F", "I", "B", "W", "C90", "N", "UP", "ANN", "D", "S", "BLE", "A", "C4", "RET", "SIM"]
+# Ignore certain rules globally
+ignore = [
+    "D100",  # Missing docstring in public module
+    "D101",  # Missing docstring in public class
+    "D103",  # Missing docstring in public function
+    "D415",  # First line should end with punctuation
+    "D200",  # One-line docstring should fit on one line
+    "D205",  # Blank line required between summary line and description
+    "E501",  # Line too long
+    "T201",  # Print found
+    "ANN001",  # Missing type annotation for function argument
+    "ANN101",  # Missing type annotation for self in method
+    "ANN102",  # Missing type annotation for cls in classmethod
+    "W293",   # Blank line contains whitespace
+    "C408",   # Unnecessary dict call
+    "B007",   # Loop control variable not used in loop body
+    "S603",   # Subprocess call - check for execution of untrusted input
+    "ANN401",
+    "RET504"
+]
+
+# Allow autofix for all enabled rules that support it
+fixable = ["ALL"]
+unfixable = []
+
+[tool.ruff.lint.mccabe]
+# Max cyclomatic complexity threshold
+max-complexity = 15
+
+[tool.ruff.lint.isort]
+# Order imports according to PEP8 and group by type
+known-third-party = ["fastapi", "uvicorn", "pydantic"]
+known-first-party = ["main", "api"]
+section-order = ["future", "standard-library", "third-party", "first-party", "local-folder"]
+combine-as-imports = true
+
+[tool.ruff.lint.flake8-annotations]
+# Allow un-annotated arguments/returns in typed functions
+allow-star-arg-any = true
+suppress-none-returning = true
+
+[tool.ruff.lint.flake8-quotes]
+docstring-quotes = "double"
+inline-quotes = "double"
+
+[tool.ruff.lint.per-file-ignores]
+# Ignore some linting rules in test files
+"tests/*" = [
+    "S101", "ANN201", "SIM118", 
+    "D100", "D101", "D102", "D103", "D104", "D105", "D107", "D200", "D205", "D400", "D415",
+    "ANN001", "ANN002", "ANN003"
+]
+# Ignore docstring issues in scripts
+"scripts/*" = ["D100", "D101", "D102", "D103", "D104", "D105", "D107"]
+# Specific ignores for main application files
+"app.py" = [
+    "C901", 
+    "D100", "D101", "D102", "D103", "D104", "D105", "D107", 
+    "ANN001", "ANN002", "ANN003", "ANN201", "ANN202", 
+    "BLE001", 
+    "S101", "S301", "S302", 
+    "RET504", 
+    "SIM108", "SIM118"
+]
+"main.py" = [
+    "C901", 
+    "D100", "D101", "D102", "D103", "D104", "D105", "D107", 
+    "ANN001", "ANN002", "ANN003", "ANN201", "ANN202", 
+    "BLE001", 
+    "S101", "S301", "S302", 
+    "RET504", 
+    "SIM108", "SIM118"
+]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.format]
+# Use double quotes for strings
+quote-style = "double"
+# Indent with 4 spaces
+indent-style = "space"
+# Line ending style
+line-ending = "auto"
+# Format docstrings
+docstring-code-format = true
+# Skip magic trailing comma
+skip-magic-trailing-comma = false
+
+[build-system]
+requires = ["setuptools>=42", "wheel"]
+build-backend = "setuptools.build_meta" 
