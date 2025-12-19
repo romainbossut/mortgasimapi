@@ -385,31 +385,38 @@ def simulate_mortgage(
     fixed_rate: float,
     fixed_term_months: int,
     mortgage_rate_curve: list[float] | Callable[[int], float],
-    savings_rate_curve: list[float] | Callable[[int], float],
-    overpayment_schedule: dict[int, float],
-    monthly_savings_contribution: float,
+    # Legacy parameter - keep for backward compatibility with tests/CLI
+    savings_rate_curve: list[float] | Callable[[int], float] | None = None,
+    overpayment_schedule: dict[int, float] | None = None,
+    # Legacy parameter - keep for backward compatibility with tests/CLI
+    monthly_savings_contribution: float = 0.0,
     initial_savings: float = 0.0,
     typical_payment: float = 0.0,
     asset_value: float = 0.0,
     max_payment_after_fixed: float = float('inf'),
-    verbose: bool = False
+    verbose: bool = False,
+    # New parameter for multi-account support
+    savings_accounts: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Simulate a mortgage with a fixed period and then a variable rate according to mortgage_rate_curve.
-    
+
     Parameters:
     - mortgage_amount: float, initial principal
     - term_months: int, total mortgage duration in months
     - fixed_rate: float, annual interest rate for the fixed term in percentage (e.g., 1.65 for 1.65%)
     - fixed_term_months: int, number of months for which the fixed_rate applies
     - mortgage_rate_curve: array-like or callable giving the annual interest rate after the fixed term in percentage
-    - savings_rate_curve: array-like or callable giving the annual interest rate for savings in percentage
     - overpayment_schedule: dict mapping month_index (0-based) to overpayment amount
-    - monthly_savings_contribution: float, amount contributed to savings each month
-    - initial_savings: float, starting balance in savings account
-    - typical_payment: float, if monthly payment is below this, difference is added to savings
+    - savings_accounts: list of dicts, each with 'name', 'rate', 'monthly_contribution', 'initial_balance'
+    - typical_payment: float, if monthly payment is below this, difference is added to first savings account
     - asset_value: float, value of the property (assumed constant)
     - max_payment_after_fixed: float, maximum allowed monthly payment after fixed period
-    
+
+    Legacy parameters (deprecated, use savings_accounts instead):
+    - savings_rate_curve: array-like or callable giving the annual interest rate for savings in percentage
+    - monthly_savings_contribution: float, amount contributed to savings each month
+    - initial_savings: float, starting balance in savings account
+
     Returns:
     dict with simulation results including:
     - month_data: list of dicts with monthly data where:
@@ -422,23 +429,52 @@ def simulate_mortgage(
         - total_payment: monthly_payment + overpayment
         - interest_paid: interest portion of payment
         - principal_repaid: principal portion of payment
-        - savings_balance_end: savings balance at end of month
-        - savings_interest: interest earned on savings
+        - savings_balance_end: consolidated savings balance at end of month
+        - savings_interest: consolidated interest earned on savings
+        - accounts: dict of per-account data {name: {balance_end, interest, contribution}}
         - net_worth: savings - mortgage + asset_value
         - annual_mortgage_rate: mortgage rate in percentage
         - monthly_interest_rate: monthly mortgage rate in decimal
-        - annual_savings_rate: savings rate in percentage
-        - monthly_savings_rate: monthly savings rate in decimal
+        - annual_savings_rate: average savings rate in percentage (for compatibility)
+        - monthly_savings_rate: average monthly savings rate in decimal (for compatibility)
+    - account_summaries: list of per-account summary stats
     - warnings: list of warning messages
     """
+    # Handle default for overpayment_schedule
+    if overpayment_schedule is None:
+        overpayment_schedule = {}
+
+    # Handle legacy parameters - convert to savings_accounts format
+    if savings_accounts is None or len(savings_accounts) == 0:
+        if monthly_savings_contribution > 0 or initial_savings > 0:
+            # Legacy single-account mode
+            legacy_rate = 4.0  # Default rate
+            if savings_rate_curve is not None:
+                if callable(savings_rate_curve):
+                    legacy_rate = savings_rate_curve(0)
+                elif len(savings_rate_curve) > 0:
+                    legacy_rate = savings_rate_curve[0]
+            savings_accounts = [{
+                'name': 'Savings',
+                'rate': legacy_rate,
+                'monthly_contribution': monthly_savings_contribution,
+                'initial_balance': initial_savings
+            }]
+        else:
+            # No savings at all
+            savings_accounts = []
     # Validate inputs
     results = {'month_data': [], 'warnings': []}
 
-    # Validate rate curves
+    # Validate rate curves (only mortgage rate curve now, savings rates are per-account)
+    # Create a dummy savings_rate_curve for validation compatibility
+    dummy_savings_curve = [4.0] * term_months
     validation_warnings = validate_rate_curves(
-        term_months, fixed_term_months, mortgage_rate_curve, savings_rate_curve
+        term_months, fixed_term_months, mortgage_rate_curve, dummy_savings_curve
     )
     if validation_warnings:
+        # Filter out savings-related warnings since we don't use savings_rate_curve anymore
+        validation_warnings = [w for w in validation_warnings if "Savings" not in w and "savings" not in w]
         results['warnings'].extend(validation_warnings)
         if any("must be less than" in w for w in validation_warnings):
             return results  # Cannot proceed if fixed term >= total term
@@ -481,8 +517,19 @@ def simulate_mortgage(
                 f"at {initial_variable_rate:.2f}% (requires £{required_payment:,.2f} monthly)"
             )
 
-    # Savings account state
-    savings_balance = initial_savings
+    # Initialize per-account balances and tracking
+    account_balances: dict[str, float] = {}
+    account_total_contributions: dict[str, float] = {}
+    account_total_interest: dict[str, float] = {}
+
+    for acc in savings_accounts:
+        name = acc['name']
+        account_balances[name] = acc['initial_balance']
+        account_total_contributions[name] = 0.0
+        account_total_interest[name] = 0.0
+
+    # Calculate consolidated initial savings for overpayment handling
+    savings_balance = sum(account_balances.values())
 
     # Main simulation loop
     for m in range(total_months):
@@ -527,16 +574,7 @@ def simulate_mortgage(
         if warning:
             results["warnings"].append(warning)
 
-        # Get savings rate safely
-        annual_savings_rate = get_rate_for_month(
-            savings_rate_curve,
-            m,
-            0.0,  # Use 0% as fallback for savings
-            "savings rate"
-        )
-        monthly_savings_rate = monthly_rate(annual_savings_rate)
-
-        # Handle overpayment
+        # Handle overpayment (using consolidated savings balance)
         overpayment = overpayment_schedule.get(m, 0.0)
         overpayment, savings_balance, warning = handle_overpayment(
             overpayment, savings_balance, m
@@ -544,8 +582,19 @@ def simulate_mortgage(
         if warning:
             results["warnings"].append(warning)
 
-        # Calculate mortgage payments using daily compounding  
-        monthly_mortgage_rate = monthly_rate(annual_mortgage_rate)  # Keep for compatibility with data recording
+        # If overpayment was reduced due to insufficient funds, distribute the reduction
+        # proportionally across accounts (deduct from accounts with highest balances first)
+        if overpayment > 0:
+            # Deduct overpayment from accounts proportionally to their balances
+            total_balance = sum(account_balances.values())
+            if total_balance > 0:
+                for name in account_balances:
+                    proportion = account_balances[name] / total_balance
+                    deduction = overpayment * proportion
+                    account_balances[name] -= deduction
+
+        # Calculate mortgage payments using daily compounding
+        monthly_mortgage_rate = monthly_rate(annual_mortgage_rate)  # Keep for compatibility
         interest_for_month = monthly_interest_from_daily(principal, annual_mortgage_rate, m)
 
         base_payment = current_monthly_payment if principal > 0 else 0
@@ -573,20 +622,57 @@ def simulate_mortgage(
             print(f"  Principal: £{principal:.2f} -> £{new_principal:.2f}")
 
         principal = max(new_principal, 0.0)
-        # Warning moved down to after data recording
 
-        # Update savings balance with contributions first
-        savings_balance = (
-            savings_balance
-            + monthly_savings_contribution
-            + payment_difference  # Add the payment difference to savings
-        )
+        # Process each savings account
+        account_month_data: dict[str, dict[str, float]] = {}
+        total_savings_interest = 0.0
+        total_contribution_this_month = 0.0
 
-        # Calculate savings interest on the updated balance
-        savings_interest = savings_balance * monthly_savings_rate
+        for i, acc in enumerate(savings_accounts):
+            name = acc['name']
+            acc_rate = acc['rate']
+            acc_contribution = acc['monthly_contribution']
 
-        # Add the calculated interest to the final end-of-month balance
-        savings_balance_end = savings_balance + savings_interest
+            # Add payment difference to first account only
+            contribution = acc_contribution
+            if i == 0:
+                contribution += payment_difference
+
+            # Add contribution to account
+            account_balances[name] += contribution
+            account_total_contributions[name] += contribution
+            total_contribution_this_month += contribution
+
+            # Calculate interest for this account
+            acc_monthly_rate = monthly_rate(acc_rate)
+            acc_interest = account_balances[name] * acc_monthly_rate
+            account_balances[name] += acc_interest
+            account_total_interest[name] += acc_interest
+            total_savings_interest += acc_interest
+
+            # Record per-account data for this month
+            account_month_data[name] = {
+                'balance_end': account_balances[name],
+                'interest': acc_interest,
+                'contribution': contribution
+            }
+
+        # Calculate consolidated savings values
+        savings_balance_end = sum(account_balances.values())
+
+        # Calculate average savings rate for backward compatibility
+        if len(savings_accounts) > 0:
+            total_balance_for_avg = sum(acc['initial_balance'] for acc in savings_accounts)
+            if total_balance_for_avg > 0:
+                annual_savings_rate = sum(
+                    acc['rate'] * acc['initial_balance'] / total_balance_for_avg
+                    for acc in savings_accounts
+                )
+            else:
+                annual_savings_rate = sum(acc['rate'] for acc in savings_accounts) / len(savings_accounts)
+        else:
+            annual_savings_rate = 0.0
+        monthly_savings_rate_avg = monthly_rate(annual_savings_rate)
 
         # Record month data
         month_data = {
@@ -599,14 +685,15 @@ def simulate_mortgage(
             "total_payment": total_payment,
             "interest_paid": interest_for_month,
             "principal_repaid": principal_repaid,
-            "savings_balance_end": savings_balance_end, # Use final balance including interest
-            "savings_interest": savings_interest,   # Use calculated interest
-            "net_worth": savings_balance_end - principal + asset_value, # Use final balance
+            "savings_balance_end": savings_balance_end,
+            "savings_interest": total_savings_interest,
+            "accounts": account_month_data,  # Per-account data
+            "net_worth": savings_balance_end - principal + asset_value,
             "annual_mortgage_rate": annual_mortgage_rate,
             "monthly_interest_rate": monthly_mortgage_rate,
             "annual_savings_rate": annual_savings_rate,
-            "monthly_savings_rate": monthly_savings_rate,
-            "payment_difference": payment_difference  # Add this to track the difference
+            "monthly_savings_rate": monthly_savings_rate_avg,
+            "payment_difference": payment_difference
         }
         results["month_data"].append(month_data)
 
@@ -647,10 +734,22 @@ def simulate_mortgage(
     for i, data in enumerate(results["month_data"]):
         if data["savings_balance_end"] < min_savings_balance:
             min_savings_balance = data["savings_balance_end"]
-            min_savings_month = data["month"] # 1-based month
+            min_savings_month = data["month"]  # 1-based month
 
     results["min_savings_balance"] = min_savings_balance
     results["min_savings_month"] = min_savings_month
+
+    # Build per-account summaries
+    account_summaries = []
+    for acc in savings_accounts:
+        name = acc['name']
+        account_summaries.append({
+            'name': name,
+            'final_balance': account_balances[name],
+            'total_contributions': account_total_contributions[name],
+            'total_interest_earned': account_total_interest[name]
+        })
+    results["account_summaries"] = account_summaries
 
     # Add final summary to warnings if mortgage was paid off
     if results.get("mortgage_paid_off_month"):
