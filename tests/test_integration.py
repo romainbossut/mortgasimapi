@@ -33,7 +33,7 @@ def test_basic_command_execution():
     assert result.returncode == 0
 
     # Check expected output elements
-    assert "Payment components around fixed-to-variable rate transition" in result.stdout
+    assert "Payment components around rate transitions" in result.stdout
     assert "CSV data saved to:" in result.stdout
     assert "Last month data:" in result.stdout
 
@@ -138,7 +138,7 @@ def test_full_scenario_with_overpayments():
     assert "Month 36 (Year 3.0)" in result.stdout  # Second overpayment
 
     # Check for key simulation results
-    assert "Payment components around fixed-to-variable rate transition" in result.stdout
+    assert "Payment components around rate transitions" in result.stdout
     assert "CSV data saved to:" in result.stdout
 
     # Verify the simulation completed successfully

@@ -44,14 +44,27 @@ app.add_middleware(
 
 
 # Request Models
+class Deal(BaseModel):
+    """A fixed-rate deal period"""
+    start_month: int = Field(..., ge=0, description="0-based start month (inclusive)")
+    end_month: int = Field(..., gt=0, description="0-based end month (exclusive)")
+    rate: float = Field(..., ge=0, le=15, description="Annual interest rate as percentage")
+
+    @validator('end_month')
+    def end_after_start(cls, v, values):
+        if 'start_month' in values and v <= values['start_month']:
+            raise ValueError('end_month must be greater than start_month')
+        return v
+
+
 class MortgageParameters(BaseModel):
     """Mortgage-related input parameters"""
     amount: float = Field(..., gt=0, description="Initial mortgage amount in pounds")
     term_years: float = Field(..., gt=0, le=40, description="Mortgage term in years")
-    fixed_rate: float = Field(..., ge=0, le=15, description="Fixed interest rate as percentage (e.g., 1.65)")
-    fixed_term_months: int = Field(..., ge=0, description="Fixed rate term in months")
-    variable_rate: float = Field(6.0, ge=0, le=15, description="Variable rate after fixed term as percentage")
-    max_payment_after_fixed: Optional[float] = Field(None, gt=0, description="Maximum monthly payment after fixed period")
+    fixed_rate: float = Field(0.0, ge=0, le=15, description="Fixed interest rate as percentage (legacy, use deals instead)")
+    fixed_term_months: int = Field(0, ge=0, description="Fixed rate term in months (legacy, use deals instead)")
+    variable_rate: float = Field(6.0, ge=0, le=15, description="Variable rate / SVR as percentage")
+    deals: Optional[List[Deal]] = Field(None, description="List of fixed-rate deal periods")
 
 
 class SavingsParameters(BaseModel):
@@ -74,13 +87,32 @@ class SimulationRequest(BaseModel):
     mortgage: MortgageParameters
     savings: SavingsParameters
     simulation: SimulationParameters = SimulationParameters()
-    
+
     @validator('mortgage')
-    def validate_fixed_term(cls, v, values):
-        """Ensure fixed term is less than total term"""
+    def validate_mortgage(cls, v, values):
+        """Validate deals don't overlap and are within term"""
         term_months = int(v.term_years * 12)
-        if v.fixed_term_months >= term_months:
-            raise ValueError(f"Fixed term ({v.fixed_term_months} months) must be less than total term ({term_months} months)")
+
+        if v.deals is not None:
+            for deal in v.deals:
+                if deal.end_month > term_months:
+                    raise ValueError(
+                        f"Deal end month ({deal.end_month}) exceeds total term ({term_months} months)"
+                    )
+            # Check for overlaps
+            sorted_deals = sorted(v.deals, key=lambda d: d.start_month)
+            for i in range(1, len(sorted_deals)):
+                if sorted_deals[i].start_month < sorted_deals[i - 1].end_month:
+                    raise ValueError(
+                        f"Deals overlap: deal ending at month {sorted_deals[i-1].end_month} "
+                        f"overlaps with deal starting at month {sorted_deals[i].start_month}"
+                    )
+        else:
+            # Legacy validation
+            if v.fixed_term_months >= term_months:
+                raise ValueError(
+                    f"Fixed term ({v.fixed_term_months} months) must be less than total term ({term_months} months)"
+                )
         return v
 
 
@@ -139,6 +171,24 @@ class SimulationResponse(BaseModel):
 
 
 # Utility functions
+def build_rate_curve(mortgage: MortgageParameters, term_months: int) -> List[float]:
+    """Build a full rate curve from deals + variable_rate.
+    If deals is None, synthesize from legacy fixed_rate/fixed_term_months."""
+    deals = mortgage.deals
+    if deals is None:
+        # Legacy: synthesize one deal from fixed_rate/fixed_term_months
+        if mortgage.fixed_term_months > 0:
+            deals = [Deal(start_month=0, end_month=mortgage.fixed_term_months, rate=mortgage.fixed_rate)]
+        else:
+            deals = []
+
+    rate_curve = [mortgage.variable_rate] * term_months
+    for deal in deals:
+        for m in range(deal.start_month, min(deal.end_month, term_months)):
+            rate_curve[m] = deal.rate
+    return rate_curve
+
+
 def create_chart_data(results: Dict[str, Any], request: SimulationRequest, display_limit_month: Optional[int] = None) -> ChartData:
     """Convert simulation results to chart-friendly format"""
     month_data = results['month_data']
@@ -182,13 +232,18 @@ def create_chart_data(results: Dict[str, Any], request: SimulationRequest, displ
 def create_summary_statistics(results: Dict[str, Any], request: SimulationRequest) -> SummaryStatistics:
     """Create summary statistics from simulation results"""
     last_month = results["month_data"][-1]
-    
-    # Calculate fixed term end balance
+
+    # Calculate fixed term end balance (use first deal's end_month, or legacy fixed_term_months)
     fixed_term_end_balance = None
-    if (request.mortgage.fixed_term_months > 0 and 
-        request.mortgage.fixed_term_months <= len(results["month_data"])):
+    deals = request.mortgage.deals
+    if deals and len(deals) > 0:
+        first_deal_end = deals[0].end_month
+        if 0 < first_deal_end <= len(results["month_data"]):
+            fixed_term_end_balance = results["month_data"][first_deal_end - 1]["principal_end"]
+    elif (request.mortgage.fixed_term_months > 0 and
+          request.mortgage.fixed_term_months <= len(results["month_data"])):
         fixed_term_end_balance = results["month_data"][request.mortgage.fixed_term_months - 1]["principal_end"]
-    
+
     return SummaryStatistics(
         final_mortgage_balance=last_month['principal_end'],
         final_savings_balance=last_month['savings_balance_end'],
@@ -231,35 +286,34 @@ async def simulate_mortgage_endpoint(request: SimulationRequest):
     try:
         # Convert parameters
         term_months = int(request.mortgage.term_years * 12)
-        
-        # Create rate curves
-        mortgage_rate_curve = [request.mortgage.variable_rate for _ in range(term_months - request.mortgage.fixed_term_months)]
+
+        # Build full rate curve from deals
+        rate_curve = build_rate_curve(request.mortgage, term_months)
+
+        # Create savings rate curve
         savings_rate_curve = [request.savings.rate for _ in range(term_months)]
-        
+
         # Parse overpayments
         overpayment_schedule = {}
         if request.simulation.overpayments:
             overpayment_schedule = parse_overpayment_string(request.simulation.overpayments, term_months)
         else:
             overpayment_schedule = dict.fromkeys(range(term_months), 0)
-        
-        # Set max payment
-        max_payment = request.mortgage.max_payment_after_fixed or float('inf')
-        
+
         # Run simulation
         results = simulate_mortgage(
             mortgage_amount=request.mortgage.amount,
             term_months=term_months,
             fixed_rate=request.mortgage.fixed_rate,
             fixed_term_months=request.mortgage.fixed_term_months,
-            mortgage_rate_curve=mortgage_rate_curve,
+            mortgage_rate_curve=[request.mortgage.variable_rate] * term_months,
             savings_rate_curve=savings_rate_curve,
             overpayment_schedule=overpayment_schedule,
             monthly_savings_contribution=request.savings.monthly_contribution,
             initial_savings=request.savings.initial_balance,
             typical_payment=request.simulation.typical_payment,
             asset_value=request.simulation.asset_value,
-            max_payment_after_fixed=max_payment
+            rate_curve=rate_curve,
         )
         
         # Convert month data to Pydantic models
@@ -296,30 +350,28 @@ async def export_simulation_csv(request: SimulationRequest):
     try:
         # Run simulation (reuse logic from simulate endpoint)
         term_months = int(request.mortgage.term_years * 12)
-        mortgage_rate_curve = [request.mortgage.variable_rate for _ in range(term_months - request.mortgage.fixed_term_months)]
+        rate_curve = build_rate_curve(request.mortgage, term_months)
         savings_rate_curve = [request.savings.rate for _ in range(term_months)]
-        
+
         overpayment_schedule = {}
         if request.simulation.overpayments:
             overpayment_schedule = parse_overpayment_string(request.simulation.overpayments, term_months)
         else:
             overpayment_schedule = dict.fromkeys(range(term_months), 0)
-        
-        max_payment = request.mortgage.max_payment_after_fixed or float('inf')
-        
+
         results = simulate_mortgage(
             mortgage_amount=request.mortgage.amount,
             term_months=term_months,
             fixed_rate=request.mortgage.fixed_rate,
             fixed_term_months=request.mortgage.fixed_term_months,
-            mortgage_rate_curve=mortgage_rate_curve,
+            mortgage_rate_curve=[request.mortgage.variable_rate] * term_months,
             savings_rate_curve=savings_rate_curve,
             overpayment_schedule=overpayment_schedule,
             monthly_savings_contribution=request.savings.monthly_contribution,
             initial_savings=request.savings.initial_balance,
             typical_payment=request.simulation.typical_payment,
             asset_value=request.simulation.asset_value,
-            max_payment_after_fixed=max_payment
+            rate_curve=rate_curve,
         )
         
         # Save to CSV and return file
@@ -349,7 +401,8 @@ async def get_sample_request():
             term_years=21.0,
             fixed_rate=1.65,
             fixed_term_months=12,
-            variable_rate=6.0
+            variable_rate=6.0,
+            deals=[Deal(start_month=0, end_month=12, rate=1.65)]
         ),
         savings=SavingsParameters(
             rate=4.30,

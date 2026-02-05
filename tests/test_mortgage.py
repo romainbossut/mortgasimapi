@@ -146,207 +146,172 @@ def test_check_amortization_feasible():
     assert isclose(required_payment, 200000 / 300, rel_tol=1e-4)
 
 
-def test_simulate_mortgage_with_impossible_payment_constraint():
-    """Test simulation behavior when payment constraint makes amortization impossible"""
-    # Setup test parameters
+def test_simulate_mortgage_with_rate_curve():
+    """Test simulation with a full rate curve (multi-deal style)"""
     mortgage_amount = 200000
     term_months = 300
-    fixed_rate = 2.0  # 2%
-    fixed_term_months = 24
-    mortgage_rate_curve = [6.0 for _ in range(term_months - fixed_term_months)]  # 6%
-    savings_rate_curve = [3.0 for _ in range(term_months)]  # 3%
-    overpayment_schedule = dict.fromkeys(range(term_months), 0)
-    monthly_savings = 1000
-    initial_savings = 50000
-    max_payment = 500  # Impossibly low payment
-
-    # Run simulation
-    results = simulate_mortgage(
-        mortgage_amount,
-        term_months,
-        fixed_rate,
-        fixed_term_months,
-        mortgage_rate_curve,
-        savings_rate_curve,
-        overpayment_schedule,
-        monthly_savings,
-        initial_savings,
-        max_payment_after_fixed=max_payment,
-    )
-
-    # Check that warnings were generated about insufficient payment
-    assert len(results["warnings"]) > 0
-    assert any("insufficient to amortize" in w for w in results["warnings"])
-
-    # Get the principal values around the transition
-    fixed_period_end = results["month_data"][fixed_term_months - 1]["principal_end"]
-    next_month_end = results["month_data"][fixed_term_months]["principal_end"]
-
-    # Principal should not increase (due to negative amortization prevention)
-    # It should either stay the same (interest-only) or decrease
-    assert next_month_end <= fixed_period_end, (
-        f"Principal should not increase after fixed period. "
-        f"Was £{fixed_period_end:.2f}, became £{next_month_end:.2f}"
-    )
-
-    # Check that after transition, payments are at least covering interest
-    # by verifying principal never increases
-    for i in range(fixed_term_months + 1, len(results["month_data"])):
-        current = results["month_data"][i]["principal_end"]
-        previous = results["month_data"][i - 1]["principal_end"]
-        assert current <= previous, (
-            f"Principal increased at month {i} from £{previous:.2f} to £{current:.2f}"
-        )
-
-
-def test_simulate_mortgage_with_tight_payment_constraint():
-    """Test simulation behavior when payment constraint is tight but possible"""
-    # Setup test parameters
-    mortgage_amount = 200000
-    term_months = 300
-    fixed_rate = 2.0  # 2%
-    fixed_term_months = 24
-    mortgage_rate_curve = [4.0 for _ in range(term_months - fixed_term_months)]  # 4%
-    savings_rate_curve = [3.0 for _ in range(term_months)]  # 3%
+    savings_rate_curve = [3.0 for _ in range(term_months)]
     overpayment_schedule = dict.fromkeys(range(term_months), 0)
     monthly_savings = 1000
     initial_savings = 50000
 
-    # Calculate initial payment during fixed period based on the fixed period only
-    initial_payment = calculate_monthly_payment(
-        mortgage_amount,
-        fixed_rate,
-        fixed_term_months
-    )
+    # Build rate curve: 2% for first 24 months, then 6% for the rest
+    rate_curve = [2.0] * 24 + [6.0] * (term_months - 24)
 
-    # Calculate expected principal at end of fixed period
-    expected_principal_at_fixed_end = mortgage_amount
-    for _ in range(fixed_term_months):
-        interest = expected_principal_at_fixed_end * (fixed_rate/100) / 12
-        principal_repayment = initial_payment - interest
-        expected_principal_at_fixed_end -= principal_repayment
-
-    # Calculate minimum viable payment for variable rate period
-    remaining_term = term_months - fixed_term_months
-    min_payment = calculate_monthly_payment(
-        expected_principal_at_fixed_end, 4.0, remaining_term
-    )
-    max_payment = min_payment * 1.05  # 5% above minimum required
-
-    # Run simulation
     results = simulate_mortgage(
-        mortgage_amount,
-        term_months,
-        fixed_rate,
-        fixed_term_months,
-        mortgage_rate_curve,
-        savings_rate_curve,
-        overpayment_schedule,
-        monthly_savings,
-        initial_savings,
-        max_payment_after_fixed=max_payment,
+        mortgage_amount=mortgage_amount,
+        term_months=term_months,
+        fixed_rate=0,
+        fixed_term_months=0,
+        mortgage_rate_curve=[],
+        savings_rate_curve=savings_rate_curve,
+        overpayment_schedule=overpayment_schedule,
+        monthly_savings_contribution=monthly_savings,
+        initial_savings=initial_savings,
+        rate_curve=rate_curve,
     )
 
-    # Print debug information for the first few months
-    print("\nFirst few months of simulation:")
-    for i in range(min(5, len(results["month_data"]))):
-        data = results["month_data"][i]
-        print(f"\nMonth {data['month']}:")
-        print(f"  Principal start: £{data['principal_start']:.2f}")
-        print(f"  Monthly payment: £{data['monthly_payment']:.2f}")
-        print(f"  Interest paid: £{data['interest_paid']:.2f}")
-        print(f"  Principal repaid: £{data['principal_repaid']:.2f}")
-        print(f"  Principal end: £{data['principal_end']:.2f}")
+    # Check rates are correct
+    for i in range(24):
+        assert results["month_data"][i]["annual_mortgage_rate"] == 2.0
+    for i in range(24, min(50, term_months)):
+        assert results["month_data"][i]["annual_mortgage_rate"] == 6.0
 
-    # Check that principal decreases over time during fixed period
-    for i in range(1, fixed_term_months):
+    # Principal should decrease throughout
+    for i in range(1, len(results["month_data"])):
         assert (
             results["month_data"][i]["principal_end"]
             <= results["month_data"][i - 1]["principal_end"]
-        ), (
-            f"Principal increased during fixed period at month {i} "
-            f"from £{results['month_data'][i-1]['principal_end']:.2f} "
-            f"to £{results['month_data'][i]['principal_end']:.2f} "
-            f"with payment £{results['month_data'][i]['monthly_payment']:.2f}"
-        )
-
-    # Check that principal decreases over time during variable period
-    for i in range(fixed_term_months + 1, len(results["month_data"])):
-        assert (
-            results["month_data"][i]["principal_end"]
-            <= results["month_data"][i - 1]["principal_end"]
-        ), (
-            f"Principal increased during variable period at month {i} "
-            f"from £{results['month_data'][i-1]['principal_end']:.2f} "
-            f"to £{results['month_data'][i]['principal_end']:.2f} "
-            f"with payment £{results['month_data'][i]['monthly_payment']:.2f}"
-        )
-
-    # Check that we eventually pay off the mortgage
-    final_principal = results["month_data"][-1]["principal_end"]
-    assert final_principal < mortgage_amount
+        ), f"Principal increased at month {i}"
 
 
-def test_simulate_mortgage_with_overpayments_and_constraints():
-    """Test simulation behavior with both overpayments and payment constraints"""
-    # Setup test parameters
+def test_simulate_mortgage_multi_deal_with_gap():
+    """Test simulation with multiple deals and a gap (SVR applies in gaps)"""
     mortgage_amount = 200000
-    term_months = 300
-    fixed_rate = 2.0  # 2%
-    fixed_term_months = 24
-    mortgage_rate_curve = [4.0 for _ in range(term_months - fixed_term_months)]  # 4% instead of 6%
-    savings_rate_curve = [3.0 for _ in range(term_months)]  # 3%
+    term_months = 120  # 10 years
+    savings_rate_curve = [3.0 for _ in range(term_months)]
+    overpayment_schedule = dict.fromkeys(range(term_months), 0)
     monthly_savings = 1000
     initial_savings = 50000
 
-    # Calculate initial payment during fixed period
-    initial_payment = calculate_monthly_payment(mortgage_amount, fixed_rate, term_months)
+    # Deal 1: months 0-24 at 2%, gap months 24-36 at SVR (5%), deal 2: months 36-60 at 3%
+    variable_rate = 5.0
+    rate_curve = [variable_rate] * term_months
+    for m in range(0, 24):
+        rate_curve[m] = 2.0
+    for m in range(36, 60):
+        rate_curve[m] = 3.0
 
-    # Calculate expected principal at end of fixed period
-    expected_principal_at_fixed_end = mortgage_amount
-    for _ in range(fixed_term_months):
-        interest = expected_principal_at_fixed_end * (fixed_rate/100) / 12
-        principal_repayment = initial_payment - interest
-        expected_principal_at_fixed_end -= principal_repayment
-
-    # Create overpayment schedule with significant overpayments
-    overpayment_schedule = dict.fromkeys(range(term_months), 0)
-    overpayment_schedule[fixed_term_months] = 20000  # Large overpayment at end of fixed period
-
-    # Account for overpayment in expected principal
-    expected_principal_after_overpayment = expected_principal_at_fixed_end - 20000
-
-    # Calculate minimum viable payment for remaining term after overpayment
-    remaining_term = term_months - fixed_term_months
-    min_payment = calculate_monthly_payment(
-        expected_principal_after_overpayment, 4.0, remaining_term
-    )
-    max_payment = min_payment * 1.05  # 5% above minimum required
-
-    # Run simulation
     results = simulate_mortgage(
-        mortgage_amount,
-        term_months,
-        fixed_rate,
-        fixed_term_months,
-        mortgage_rate_curve,
-        savings_rate_curve,
-        overpayment_schedule,
-        monthly_savings,
-        initial_savings,
-        max_payment_after_fixed=max_payment,
+        mortgage_amount=mortgage_amount,
+        term_months=term_months,
+        fixed_rate=0,
+        fixed_term_months=0,
+        mortgage_rate_curve=[],
+        savings_rate_curve=savings_rate_curve,
+        overpayment_schedule=overpayment_schedule,
+        monthly_savings_contribution=monthly_savings,
+        initial_savings=initial_savings,
+        rate_curve=rate_curve,
+    )
+
+    # Check rates in each period
+    assert results["month_data"][0]["annual_mortgage_rate"] == 2.0
+    assert results["month_data"][23]["annual_mortgage_rate"] == 2.0
+    assert results["month_data"][24]["annual_mortgage_rate"] == 5.0  # gap = SVR
+    assert results["month_data"][35]["annual_mortgage_rate"] == 5.0
+    assert results["month_data"][36]["annual_mortgage_rate"] == 3.0
+    assert results["month_data"][59]["annual_mortgage_rate"] == 3.0
+    assert results["month_data"][60]["annual_mortgage_rate"] == 5.0  # back to SVR
+
+
+def test_simulate_mortgage_single_deal_matches_legacy():
+    """Test that a single deal produces same results as legacy fixed_rate/fixed_term_months"""
+    mortgage_amount = 200000
+    term_months = 300
+    fixed_rate = 2.0
+    fixed_term_months = 24
+    variable_rate = 6.0
+    savings_rate_curve = [3.0 for _ in range(term_months)]
+    overpayment_schedule = dict.fromkeys(range(term_months), 0)
+    monthly_savings = 1000
+    initial_savings = 50000
+
+    # Legacy path
+    mortgage_rate_curve = [variable_rate for _ in range(term_months - fixed_term_months)]
+    results_legacy = simulate_mortgage(
+        mortgage_amount=mortgage_amount,
+        term_months=term_months,
+        fixed_rate=fixed_rate,
+        fixed_term_months=fixed_term_months,
+        mortgage_rate_curve=mortgage_rate_curve,
+        savings_rate_curve=savings_rate_curve,
+        overpayment_schedule=overpayment_schedule,
+        monthly_savings_contribution=monthly_savings,
+        initial_savings=initial_savings,
+    )
+
+    # New rate_curve path
+    rate_curve = [fixed_rate] * fixed_term_months + [variable_rate] * (term_months - fixed_term_months)
+    results_new = simulate_mortgage(
+        mortgage_amount=mortgage_amount,
+        term_months=term_months,
+        fixed_rate=0,
+        fixed_term_months=0,
+        mortgage_rate_curve=[],
+        savings_rate_curve=savings_rate_curve,
+        overpayment_schedule=overpayment_schedule,
+        monthly_savings_contribution=monthly_savings,
+        initial_savings=initial_savings,
+        rate_curve=rate_curve,
+    )
+
+    # Results should match
+    assert len(results_legacy["month_data"]) == len(results_new["month_data"])
+    for i in range(len(results_legacy["month_data"])):
+        legacy = results_legacy["month_data"][i]
+        new = results_new["month_data"][i]
+        assert isclose(legacy["principal_end"], new["principal_end"], rel_tol=1e-6), (
+            f"Month {i}: principal mismatch: legacy={legacy['principal_end']:.2f} vs new={new['principal_end']:.2f}"
+        )
+        assert isclose(legacy["monthly_payment"], new["monthly_payment"], rel_tol=1e-6), (
+            f"Month {i}: payment mismatch: legacy={legacy['monthly_payment']:.2f} vs new={new['monthly_payment']:.2f}"
+        )
+
+
+def test_simulate_mortgage_with_overpayments():
+    """Test simulation behavior with overpayments at a rate transition"""
+    mortgage_amount = 200000
+    term_months = 300
+    fixed_rate = 2.0
+    fixed_term_months = 24
+    variable_rate = 4.0
+    savings_rate_curve = [3.0 for _ in range(term_months)]
+    monthly_savings = 1000
+    initial_savings = 50000
+
+    # Create overpayment at the rate transition point
+    overpayment_schedule = dict.fromkeys(range(term_months), 0)
+    overpayment_schedule[fixed_term_months] = 20000
+
+    rate_curve = [fixed_rate] * fixed_term_months + [variable_rate] * (term_months - fixed_term_months)
+
+    results = simulate_mortgage(
+        mortgage_amount=mortgage_amount,
+        term_months=term_months,
+        fixed_rate=0,
+        fixed_term_months=0,
+        mortgage_rate_curve=[],
+        savings_rate_curve=savings_rate_curve,
+        overpayment_schedule=overpayment_schedule,
+        monthly_savings_contribution=monthly_savings,
+        initial_savings=initial_savings,
+        rate_curve=rate_curve,
     )
 
     # Check that overpayment was applied
     overpayment_month_data = results["month_data"][fixed_term_months]
     assert overpayment_month_data["overpayment"] > 0
-
-    # Check that payment constraint is respected after overpayment
-    for data in results["month_data"][fixed_term_months + 1:]:
-        assert data["monthly_payment"] <= max_payment, (
-            f"Payment {data['monthly_payment']:.2f} exceeds maximum {max_payment:.2f} "
-            f"at month {data['month']}"
-        )
 
     # Check that principal decreases during fixed period
     for i in range(1, fixed_term_months):

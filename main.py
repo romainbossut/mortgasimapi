@@ -391,134 +391,85 @@ def simulate_mortgage(
     initial_savings: float = 0.0,
     typical_payment: float = 0.0,
     asset_value: float = 0.0,
-    max_payment_after_fixed: float = float('inf'),
-    verbose: bool = False
+    verbose: bool = False,
+    rate_curve: list[float] | None = None,
 ) -> dict[str, Any]:
-    """Simulate a mortgage with a fixed period and then a variable rate according to mortgage_rate_curve.
-    
+    """Simulate a mortgage with rates defined by a full rate curve or fixed+variable periods.
+
     Parameters:
     - mortgage_amount: float, initial principal
     - term_months: int, total mortgage duration in months
-    - fixed_rate: float, annual interest rate for the fixed term in percentage (e.g., 1.65 for 1.65%)
-    - fixed_term_months: int, number of months for which the fixed_rate applies
-    - mortgage_rate_curve: array-like or callable giving the annual interest rate after the fixed term in percentage
+    - fixed_rate: float, annual interest rate for the fixed term in percentage (legacy)
+    - fixed_term_months: int, number of months for which the fixed_rate applies (legacy)
+    - mortgage_rate_curve: array-like or callable giving the annual interest rate after the fixed term in percentage (legacy)
     - savings_rate_curve: array-like or callable giving the annual interest rate for savings in percentage
     - overpayment_schedule: dict mapping month_index (0-based) to overpayment amount
     - monthly_savings_contribution: float, amount contributed to savings each month
     - initial_savings: float, starting balance in savings account
     - typical_payment: float, if monthly payment is below this, difference is added to savings
     - asset_value: float, value of the property (assumed constant)
-    - max_payment_after_fixed: float, maximum allowed monthly payment after fixed period
-    
+    - rate_curve: optional full rate curve (one rate per month for the entire term).
+      If provided, fixed_rate/fixed_term_months/mortgage_rate_curve are ignored.
+
     Returns:
-    dict with simulation results including:
-    - month_data: list of dicts with monthly data where:
-        - month: 1-based month number (1 to term_months)
-        - year: decimal year (e.g., 1.5 for month 18)
-        - principal_start: principal at start of month
-        - principal_end: principal at end of month
-        - monthly_payment: base monthly payment
-        - overpayment: any overpayment made
-        - total_payment: monthly_payment + overpayment
-        - interest_paid: interest portion of payment
-        - principal_repaid: principal portion of payment
-        - savings_balance_end: savings balance at end of month
-        - savings_interest: interest earned on savings
-        - net_worth: savings - mortgage + asset_value
-        - annual_mortgage_rate: mortgage rate in percentage
-        - monthly_interest_rate: monthly mortgage rate in decimal
-        - annual_savings_rate: savings rate in percentage
-        - monthly_savings_rate: monthly savings rate in decimal
-    - warnings: list of warning messages
+    dict with simulation results including month_data, warnings, etc.
     """
     # Validate inputs
     results = {'month_data': [], 'warnings': []}
 
-    # Validate rate curves
-    validation_warnings = validate_rate_curves(
-        term_months, fixed_term_months, mortgage_rate_curve, savings_rate_curve
-    )
-    if validation_warnings:
-        results['warnings'].extend(validation_warnings)
-        if any("must be less than" in w for w in validation_warnings):
-            return results  # Cannot proceed if fixed term >= total term
+    # Build full rate curve
+    if rate_curve is not None:
+        # New multi-deal path: rate_curve covers entire term
+        full_rate_curve = list(rate_curve)
+        if len(full_rate_curve) < term_months:
+            # Pad with the last rate if too short
+            last_rate = full_rate_curve[-1] if full_rate_curve else 0.0
+            full_rate_curve.extend([last_rate] * (term_months - len(full_rate_curve)))
+    else:
+        # Legacy path: build from fixed_rate + mortgage_rate_curve
+        # Validate rate curves
+        validation_warnings = validate_rate_curves(
+            term_months, fixed_term_months, mortgage_rate_curve, savings_rate_curve
+        )
+        if validation_warnings:
+            results['warnings'].extend(validation_warnings)
+            if any("must be less than" in w for w in validation_warnings):
+                return results
+
+        full_rate_curve = [fixed_rate] * fixed_term_months
+        for i in range(term_months - fixed_term_months):
+            rate = get_rate_for_month(mortgage_rate_curve, i, fixed_rate, "mortgage rate")
+            full_rate_curve.append(rate)
 
     # Initialize state variables
     principal = mortgage_amount
     total_months = term_months
 
-    # Determine initial monthly payment for the fixed period
-    initial_payment = calculate_monthly_payment(principal, fixed_rate, term_months)
-    current_monthly_payment = initial_payment
-
-    # Calculate expected principal at end of fixed period
-    expected_principal = calculate_fixed_period_principal(
-        principal, fixed_rate, fixed_term_months, initial_payment
-    )
-
-    # Check if variable rate period is feasible with payment constraint
-    if max_payment_after_fixed < float('inf'):
-        # Get initial variable rate
-        initial_variable_rate = get_rate_for_month(
-            mortgage_rate_curve,
-            0,  # First month after fixed period
-            fixed_rate,
-            "mortgage rate"
-        )
-
-        # Check feasibility
-        is_feasible, required_payment = check_amortization_feasible(
-            expected_principal,
-            initial_variable_rate,
-            max_payment_after_fixed,
-            term_months - fixed_term_months
-        )
-
-        if not is_feasible:
-            results["warnings"].append(
-                f"Maximum payment of £{max_payment_after_fixed:,.2f} is insufficient to "
-                f"amortize £{expected_principal:,.2f} over {term_months - fixed_term_months} months "
-                f"at {initial_variable_rate:.2f}% (requires £{required_payment:,.2f} monthly)"
-            )
+    # Determine initial monthly payment
+    initial_rate = full_rate_curve[0] if full_rate_curve else 0.0
+    current_monthly_payment = calculate_monthly_payment(principal, initial_rate, term_months)
 
     # Savings account state
     savings_balance = initial_savings
 
     # Main simulation loop
     for m in range(total_months):
-        # Determine whether we are in fixed period or variable rate period
-        if m < fixed_term_months:
-            annual_mortgage_rate = fixed_rate
-        else:
-            # After fixed period, get rate from mortgage_rate_curve
-            idx = m - fixed_term_months
-            annual_mortgage_rate = get_rate_for_month(
-                mortgage_rate_curve,
-                idx,
-                fixed_rate,  # Use fixed rate as fallback
-                "mortgage rate"
+        annual_mortgage_rate = full_rate_curve[m]
+
+        # Recalculate payment when rate changes
+        if m > 0 and full_rate_curve[m] != full_rate_curve[m - 1]:
+            months_remaining = term_months - m
+            if verbose:
+                print(f"\nDEBUG: Rate change at month {m}")
+                print(f"DEBUG: Principal: £{principal:.2f}")
+                print(f"DEBUG: Rate changing from {full_rate_curve[m-1]:.2f}% to {annual_mortgage_rate:.2f}%")
+                print(f"DEBUG: Months remaining: {months_remaining}")
+
+            current_monthly_payment = calculate_monthly_payment(
+                principal, annual_mortgage_rate, months_remaining
             )
-
-            # Recalculate payment for variable rate period
-            if m == fixed_term_months:
-                months_remaining = term_months - m
-                if verbose:
-                    print(f"\nDEBUG: Transition to variable rate at month {m}")
-                    print(f"DEBUG: Principal at transition: £{principal:.2f}")
-                    print(f"DEBUG: Annual rate changing from {fixed_rate:.2f}% to {annual_mortgage_rate:.2f}%")
-                    print(f"DEBUG: Months remaining: {months_remaining}")
-
-                current_monthly_payment = calculate_monthly_payment(
-                    principal, annual_mortgage_rate, months_remaining
-                )
-                if verbose:
-                    print(f"DEBUG: Calculated payment: £{current_monthly_payment:.2f}")
-
-                if max_payment_after_fixed < float('inf'):
-                    old_payment = current_monthly_payment
-                    current_monthly_payment = min(current_monthly_payment, max_payment_after_fixed)
-                    if verbose:
-                        print(f"DEBUG: Payment constrained from £{old_payment:.2f} to £{current_monthly_payment:.2f}")
+            if verbose:
+                print(f"DEBUG: New payment: £{current_monthly_payment:.2f}")
 
         # Ensure payment covers interest
         current_monthly_payment, warning = ensure_payment_covers_interest(
@@ -564,7 +515,7 @@ def simulate_mortgage(
         principal_repaid = total_payment - interest_for_month
         new_principal = principal - principal_repaid
 
-        if verbose and m >= fixed_term_months - 1 and m <= fixed_term_months + 1:
+        if verbose and (m == 0 or full_rate_curve[m] != full_rate_curve[m - 1] if m > 0 else False):
             print(f"\nDEBUG: Month {m} payment breakdown:")
             print(f"  Current payment: £{current_monthly_payment:.2f}")
             print(f"  Base payment: £{base_payment:.2f}")
@@ -910,21 +861,30 @@ def parse_args() -> Any:
     return args
 
 
-def print_debug_info(results: dict[str, Any], fixed_term_months: int) -> None:
-    """Print debug information about the payment transition period.
+def print_debug_info(results: dict[str, Any], fixed_term_months: int = 0) -> None:
+    """Print debug information about rate transition periods.
     """
-    print("\nPayment components around fixed-to-variable rate transition:")
-    transition_start = max(0, fixed_term_months - 2)
-    transition_end = min(len(results["month_data"]), fixed_term_months + 3)
-    for i in range(transition_start, transition_end):
-        data = results["month_data"][i]
-        print(f"\nMonth {data['month']}:")
-        print(f"  Monthly Payment: £{data['monthly_payment']:.2f}")
-        print(f"  Interest Paid: £{data['interest_paid']:.2f}")
-        print(f"  Principal Repaid: £{data['principal_repaid']:.2f}")
-        print(f"  Annual Rate: {data['annual_mortgage_rate']:.4f}")
-        print(f"  Principal Start: £{data['principal_start']:.2f}")
-        print(f"  Principal End: £{data['principal_end']:.2f}")
+    print("\nPayment components around rate transitions:")
+    month_data = results["month_data"]
+    for i, data in enumerate(month_data):
+        # Print around rate changes
+        is_transition = (
+            i == 0
+            or (i > 0 and data['annual_mortgage_rate'] != month_data[i-1]['annual_mortgage_rate'])
+        )
+
+        if is_transition:
+            start = max(0, i - 1)
+            end = min(len(month_data), i + 3)
+            for j in range(start, end):
+                d = month_data[j]
+                print(f"\nMonth {d['month']}:")
+                print(f"  Monthly Payment: £{d['monthly_payment']:.2f}")
+                print(f"  Interest Paid: £{d['interest_paid']:.2f}")
+                print(f"  Principal Repaid: £{d['principal_repaid']:.2f}")
+                print(f"  Annual Rate: {d['annual_mortgage_rate']:.4f}")
+                print(f"  Principal Start: £{d['principal_start']:.2f}")
+                print(f"  Principal End: £{d['principal_end']:.2f}")
 
 
 def print_summary(last_month_data: dict[str, float | int | str]) -> None:
@@ -1044,13 +1004,12 @@ if __name__ == "__main__":
         args.initial_savings,
         args.typical_payment,
         args.asset_value,
-        args.max_payment,
-        args.verbose
+        args.verbose,
     )
 
     # Print debug information only if verbose
     if args.verbose:
-        print_debug_info(results, args.fixed_term_months)
+        print_debug_info(results)
 
     # Save results to files
     csv_file = save_results_to_csv(results, args.asset_value)
