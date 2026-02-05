@@ -155,6 +155,43 @@ def build_rate_curve(mortgage: MortgageParameters, term_months: int) -> List[flo
     return rate_curve
 
 
+def run_simulation(request: SimulationRequest) -> Dict[str, Any]:
+    """Prepare parameters from a SimulationRequest and run the simulation.
+
+    Returns the raw results dict from simulate_mortgage.
+    """
+    term_months = int(request.mortgage.term_years * 12)
+    rate_curve = build_rate_curve(request.mortgage, term_months)
+
+    if request.simulation.overpayments:
+        overpayment_schedule = parse_overpayment_string(request.simulation.overpayments, term_months)
+    else:
+        overpayment_schedule = dict.fromkeys(range(term_months), 0)
+
+    savings_accounts = [
+        {
+            'name': acc.name,
+            'rate': acc.rate,
+            'monthly_contribution': acc.monthly_contribution,
+            'initial_balance': acc.initial_balance
+        }
+        for acc in (request.savings.accounts or [])
+    ]
+
+    return simulate_mortgage(
+        mortgage_amount=request.mortgage.amount,
+        term_months=term_months,
+        fixed_rate=request.mortgage.fixed_rate,
+        fixed_term_months=request.mortgage.fixed_term_months,
+        mortgage_rate_curve=[],
+        rate_curve=rate_curve,
+        overpayment_schedule=overpayment_schedule,
+        savings_accounts=savings_accounts,
+        typical_payment=request.simulation.typical_payment,
+        asset_value=request.simulation.asset_value,
+    )
+
+
 # Response Models
 class MonthlyData(BaseModel):
     """Data for a single month of the simulation"""
@@ -345,63 +382,25 @@ async def simulate_mortgage_endpoint(request: SimulationRequest):
     - Warnings and validation messages
     """
     try:
-        # Convert parameters
+        results = run_simulation(request)
         term_months = int(request.mortgage.term_years * 12)
 
-        # Build rate curve from deals
-        rate_curve = build_rate_curve(request.mortgage, term_months)
-
-        # Parse overpayments
-        overpayment_schedule = {}
-        if request.simulation.overpayments:
-            overpayment_schedule = parse_overpayment_string(request.simulation.overpayments, term_months)
-        else:
-            overpayment_schedule = dict.fromkeys(range(term_months), 0)
-
-        # Convert savings accounts to dict format for simulation
-        savings_accounts = [
-            {
-                'name': acc.name,
-                'rate': acc.rate,
-                'monthly_contribution': acc.monthly_contribution,
-                'initial_balance': acc.initial_balance
-            }
-            for acc in (request.savings.accounts or [])
-        ]
-
-        # Run simulation
-        results = simulate_mortgage(
-            mortgage_amount=request.mortgage.amount,
-            term_months=term_months,
-            fixed_rate=request.mortgage.fixed_rate,
-            fixed_term_months=request.mortgage.fixed_term_months,
-            mortgage_rate_curve=[],
-            rate_curve=rate_curve,
-            overpayment_schedule=overpayment_schedule,
-            savings_accounts=savings_accounts,
-            typical_payment=request.simulation.typical_payment,
-            asset_value=request.simulation.asset_value,
-        )
-        
         # Convert month data to Pydantic models
         monthly_data = [MonthlyData(**data) for data in results['month_data']]
-        
+
         # Determine display limit for charts
         display_limit_month = term_months
         if "mortgage_paid_off_month" in results:
             payoff_month = results["mortgage_paid_off_month"]
             display_limit_month = min(term_months, payoff_month + (request.simulation.show_years_after_payoff * 12))
-        
-        # Create response
-        response = SimulationResponse(
+
+        return SimulationResponse(
             monthly_data=monthly_data,
             summary_statistics=create_summary_statistics(results, request),
             chart_data=create_chart_data(results, request, display_limit_month),
             warnings=results['warnings']
         )
-        
-        return response
-        
+
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Simulation error: {str(e)}")
 
@@ -415,41 +414,7 @@ async def export_simulation_csv(request: SimulationRequest):
     as a downloadable CSV file for further analysis in Excel or other tools.
     """
     try:
-        # Run simulation (reuse logic from simulate endpoint)
-        term_months = int(request.mortgage.term_years * 12)
-        rate_curve = build_rate_curve(request.mortgage, term_months)
-
-        overpayment_schedule = {}
-        if request.simulation.overpayments:
-            overpayment_schedule = parse_overpayment_string(request.simulation.overpayments, term_months)
-        else:
-            overpayment_schedule = dict.fromkeys(range(term_months), 0)
-
-        # Convert savings accounts to dict format for simulation
-        savings_accounts = [
-            {
-                'name': acc.name,
-                'rate': acc.rate,
-                'monthly_contribution': acc.monthly_contribution,
-                'initial_balance': acc.initial_balance
-            }
-            for acc in (request.savings.accounts or [])
-        ]
-
-        results = simulate_mortgage(
-            mortgage_amount=request.mortgage.amount,
-            term_months=term_months,
-            fixed_rate=request.mortgage.fixed_rate,
-            fixed_term_months=request.mortgage.fixed_term_months,
-            mortgage_rate_curve=[],
-            rate_curve=rate_curve,
-            overpayment_schedule=overpayment_schedule,
-            savings_accounts=savings_accounts,
-            typical_payment=request.simulation.typical_payment,
-            asset_value=request.simulation.asset_value,
-        )
-
-        # Save to CSV and return file
+        results = run_simulation(request)
         csv_file_path = save_results_to_csv(results, request.simulation.asset_value)
 
         return FileResponse(

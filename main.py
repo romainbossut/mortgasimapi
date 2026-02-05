@@ -8,7 +8,6 @@ or use of this software is strictly prohibited.
 """
 
 import csv
-import json
 import os
 from collections.abc import Callable
 from datetime import datetime
@@ -97,60 +96,6 @@ def create_overpayment_schedule(
 
     return schedule
 
-
-def check_amortization_feasible(
-    principal: float, rate: float, max_payment: float, term_months: int
-) -> tuple[bool, float]:
-    """Check if a mortgage can be amortized within given constraints.
-
-    Parameters:
-    - principal: Remaining principal
-    - rate: Annual interest rate in percentage (e.g., 1.6 for 1.6%)
-    - max_payment: Maximum allowed monthly payment
-    - term_months: Remaining term in months
-
-    Returns:
-    - (bool, float): (Is amortization possible, Required monthly payment)
-    """
-    if max_payment <= 0:
-        return False, float("inf")
-
-    # Convert percentage to decimal
-    rate_decimal = rate / 100.0
-    monthly_rate = rate_decimal / 12.0
-    monthly_interest = principal * monthly_rate
-
-    # Calculate required payment for the term
-    if monthly_rate == 0:
-        required_payment = principal / term_months
-    else:
-        required_payment = (
-            monthly_rate * principal / (1 - (1 + monthly_rate) ** (-term_months))
-        )
-
-    # Check if payment can cover interest and amortize within term
-    is_feasible = max_payment >= required_payment and max_payment > monthly_interest
-
-    return is_feasible, required_payment
-
-
-def calculate_fixed_period_principal(
-    principal: float,
-    fixed_rate: float,
-    fixed_term_months: int,
-    initial_payment: float
-) -> float:
-    """Calculate the expected principal at the end of the fixed rate period.
-    fixed_rate is assumed to be an annual percentage (e.g., 2.0 means 2%).
-    """
-    expected_principal = principal
-
-    for month_idx in range(fixed_term_months):
-        interest = monthly_interest_from_daily(expected_principal, fixed_rate, month_idx)
-        principal_repayment = initial_payment - interest
-        expected_principal -= principal_repayment
-
-    return expected_principal
 
 
 def handle_overpayment(
@@ -258,98 +203,6 @@ def monthly_rate(annual_rate: float) -> float:
     return annual_rate / 100.0 / 12.0
 
 
-def record_month_data(
-    month: int,
-    principal: float,
-    principal_repaid: float,
-    annual_mortgage_rate: float,
-    monthly_mortgage_rate: float,
-    base_payment: float,
-    overpayment: float,
-    interest_for_month: float,
-    annual_savings_rate: float,
-    monthly_savings_rate: float,
-    savings_balance: float
-) -> dict[str, int | float]:
-    """Create a dictionary with all the data for a given month.
-    """
-    return {
-        "month": month + 1,
-        "principal_start": principal + principal_repaid,
-        "annual_mortgage_rate": annual_mortgage_rate,
-        "monthly_interest_rate": monthly_mortgage_rate,
-        "monthly_payment": base_payment,
-        "overpayment": overpayment,
-        "interest_paid": interest_for_month,
-        "principal_repaid": principal_repaid,
-        "principal_end": principal,
-        "annual_savings_rate": annual_savings_rate,
-        "monthly_savings_rate": monthly_savings_rate,
-        "savings_balance_end": savings_balance
-    }
-
-
-def validate_rate_curves(
-    term_months: int,
-    fixed_term_months: int,
-    mortgage_rate_curve: list[float] | Callable[[int], float],
-    savings_rate_curve: list[float] | Callable[[int], float]
-) -> list[str]:
-    """Validate rate curves to ensure they have correct lengths and valid values.
-    
-    Returns:
-    - List of warning messages if any issues found
-    """
-    warnings = []
-
-    # Check if fixed term is longer than total term
-    if fixed_term_months >= term_months:
-        warnings.append(
-            f"Fixed term ({fixed_term_months} months) must be less than total term ({term_months} months)"
-        )
-
-    # Check mortgage rate curve
-    if not callable(mortgage_rate_curve):
-        expected_length = term_months - fixed_term_months
-        if len(mortgage_rate_curve) < expected_length:
-            warnings.append(
-                f"Mortgage rate curve too short: has {len(mortgage_rate_curve)} entries, "
-                f"needs {expected_length} for term of {term_months} months with "
-                f"{fixed_term_months} months fixed"
-            )
-        if any(rate < 0 for rate in mortgage_rate_curve):
-            warnings.append("Mortgage rate curve contains negative rates")
-
-    # Check savings rate curve
-    if not callable(savings_rate_curve):
-        if len(savings_rate_curve) < term_months:
-            warnings.append(
-                f"Savings rate curve too short: has {len(savings_rate_curve)} entries, "
-                f"needs {term_months} for term of {term_months} months"
-            )
-        if any(rate < 0 for rate in savings_rate_curve):
-            warnings.append("Savings rate curve contains negative rates")
-
-    return warnings
-
-
-def get_rate_for_month(
-    rate_curve: list[float] | Callable[[int], float],
-    month: int,
-    default_rate: float,
-    curve_name: str
-) -> float:
-    """Safely get rate for a given month from either a list or callable rate curve.
-    Returns default_rate if index is out of range.
-    """
-    try:
-        if callable(rate_curve):
-            return rate_curve(month)
-        return rate_curve[month]
-    except (IndexError, ValueError) as e:
-        print(f"Warning: Error getting {curve_name} for month {month}, using {default_rate}%: {str(e)}")
-        return default_rate
-
 
 def ensure_payment_covers_interest(
     current_payment: float,
@@ -382,22 +235,20 @@ def ensure_payment_covers_interest(
 def simulate_mortgage(
     mortgage_amount: float,
     term_months: int,
-    fixed_rate: float,
-    fixed_term_months: int,
-    mortgage_rate_curve: list[float] | Callable[[int], float],
-    # Legacy parameter - keep for backward compatibility with tests/CLI
-    savings_rate_curve: list[float] | Callable[[int], float] | None = None,
+    # Modern parameters (used by API)
+    rate_curve: list[float] | None = None,
+    savings_accounts: list[dict[str, Any]] | None = None,
     overpayment_schedule: dict[int, float] | None = None,
-    # Legacy parameter - keep for backward compatibility with tests/CLI
-    monthly_savings_contribution: float = 0.0,
-    initial_savings: float = 0.0,
     typical_payment: float = 0.0,
     asset_value: float = 0.0,
     verbose: bool = False,
-    # New parameter for multi-account support
-    savings_accounts: list[dict[str, Any]] | None = None,
-    # Full rate curve from deals (when provided, overrides fixed_rate/fixed_term_months/mortgage_rate_curve)
-    rate_curve: list[float] | None = None,
+    # Legacy parameters (CLI / old tests — ignored when rate_curve is provided)
+    fixed_rate: float = 0.0,
+    fixed_term_months: int = 0,
+    mortgage_rate_curve: list[float] | Callable[[int], float] | None = None,
+    savings_rate_curve: list[float] | Callable[[int], float] | None = None,
+    monthly_savings_contribution: float = 0.0,
+    initial_savings: float = 0.0,
 ) -> dict[str, Any]:
     """Simulate a mortgage with a fixed period and then a variable rate according to mortgage_rate_curve.
 
@@ -473,10 +324,11 @@ def simulate_mortgage(
     else:
         # Legacy: build from fixed_rate + mortgage_rate_curve
         effective_rate_curve = [fixed_rate] * fixed_term_months
-        if callable(mortgage_rate_curve):
-            effective_rate_curve += [mortgage_rate_curve(i) for i in range(term_months - fixed_term_months)]
-        else:
-            effective_rate_curve += list(mortgage_rate_curve[:term_months - fixed_term_months])
+        if mortgage_rate_curve is not None:
+            if callable(mortgage_rate_curve):
+                effective_rate_curve += [mortgage_rate_curve(i) for i in range(term_months - fixed_term_months)]
+            else:
+                effective_rate_curve += list(mortgage_rate_curve[:term_months - fixed_term_months])
         # Pad if needed
         while len(effective_rate_curve) < term_months:
             effective_rate_curve.append(effective_rate_curve[-1] if effective_rate_curve else fixed_rate)
@@ -565,6 +417,11 @@ def simulate_mortgage(
         )
         if warning:
             results["warnings"].append(warning)
+
+        # Sync any excess refund back to per-account balances
+        excess_refunded = savings_balance - sum(account_balances.values())
+        if excess_refunded > 0 and savings_accounts:
+            account_balances[savings_accounts[0]['name']] += excess_refunded
 
         # Calculate principal portion and update mortgage state
         principal_repaid = total_payment - interest_for_month
@@ -726,60 +583,6 @@ def simulate_mortgage(
 
     return results
 
-
-def save_chart_data_to_json(
-    results: dict[str, Any],
-    asset_value: float,
-    monthly_savings_contribution: float,
-    typical_payment: float,
-    filename_prefix: str = "chart_data",
-) -> str:
-    """Save the chart data to a dated JSON file.
-
-    Returns:
-    - Path to the saved file
-    """
-    # Create data directory if it doesn't exist
-    os.makedirs("data", exist_ok=True)
-
-    # Format current date and time
-    current_time = datetime.now().strftime("%Y%m%d_%H%M%S")
-    filename = f"data/{filename_prefix}_{current_time}.json"
-
-    # Extract data for charts and round financial values to 2 decimal places
-    years = [data["month"] / 12 for data in results["month_data"]]
-    mortgage_balance = [round(data["principal_end"], 2) for data in results["month_data"]]
-    savings_balance = [round(data["savings_balance_end"], 2) for data in results["month_data"]]
-    net_worth = [
-        round(s - m + asset_value, 2)
-        for s, m in zip(savings_balance, mortgage_balance, strict=False) # Use rounded balances
-    ]
-    monthly_payments = {
-        "principal": [round(data["principal_repaid"], 2) for data in results["month_data"]],
-        "interest": [round(data["interest_paid"], 2) for data in results["month_data"]],
-        "regular_payment": [round(data["monthly_payment"], 2) for data in results["month_data"]],
-        "overpayment": [round(data["overpayment"], 2) for data in results["month_data"]]
-    }
-    monthly_savings = [
-        round(monthly_savings_contribution + data["payment_difference"], 2)
-        for data in results["month_data"]
-    ]
-
-    chart_data = {
-        "years": years,
-        "mortgage_balance": mortgage_balance,
-        "savings_balance": savings_balance,
-        "net_worth": net_worth,
-        "monthly_payments": monthly_payments,
-        "monthly_savings": monthly_savings,
-        "payment_difference": [round(data["payment_difference"], 2) for data in results["month_data"]]
-    }
-
-    # Save to JSON file
-    with open(filename, "w") as f:
-        json.dump(chart_data, f, indent=4)
-
-    return filename
 
 
 def parse_overpayment_string(
@@ -1082,18 +885,18 @@ if __name__ == "__main__":
 
     # Run simulation for the full term
     results = simulate_mortgage(
-        args.mortgage_amount,
-        term_months,
-        args.fixed_rate,
-        args.fixed_term_months,
-        mortgage_rate_curve,
-        savings_rate_curve,
-        overpayment_schedule,
-        args.monthly_savings,
-        args.initial_savings,
-        args.typical_payment,
-        args.asset_value,
-        args.verbose
+        mortgage_amount=args.mortgage_amount,
+        term_months=term_months,
+        fixed_rate=args.fixed_rate,
+        fixed_term_months=args.fixed_term_months,
+        mortgage_rate_curve=mortgage_rate_curve,
+        savings_rate_curve=savings_rate_curve,
+        overpayment_schedule=overpayment_schedule,
+        monthly_savings_contribution=args.monthly_savings,
+        initial_savings=args.initial_savings,
+        typical_payment=args.typical_payment,
+        asset_value=args.asset_value,
+        verbose=args.verbose,
     )
 
     # Print debug information only if verbose

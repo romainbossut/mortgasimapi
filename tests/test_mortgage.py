@@ -8,7 +8,6 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from main import (
     calculate_monthly_payment,
-    check_amortization_feasible,
     create_overpayment_schedule,
     simulate_mortgage,
     daily_rate,
@@ -119,31 +118,6 @@ def test_calculate_monthly_payment_edge_cases():
     payment = calculate_monthly_payment(1000, 3.0, 12)
     assert payment > 0
 
-
-def test_check_amortization_feasible():
-    """Test the amortization feasibility checker"""
-    # Test normal case where amortization is possible
-    is_feasible, required_payment = check_amortization_feasible(200000, 3.0, 1000, 300)
-    assert is_feasible
-    assert required_payment < 1000
-
-    # Test case where payment barely covers interest
-    is_feasible, required_payment = check_amortization_feasible(200000, 6.0, 1000, 300)
-    assert not is_feasible  # 1000 < required_payment for these parameters
-    assert required_payment > 1000
-
-    # Test case where payment doesn't even cover interest
-    is_feasible, required_payment = check_amortization_feasible(200000, 6.0, 500, 300)
-    assert not is_feasible
-
-    # Test edge case with zero payment
-    is_feasible, required_payment = check_amortization_feasible(200000, 3.0, 0, 300)
-    assert not is_feasible
-
-    # Test edge case with zero rate
-    is_feasible, required_payment = check_amortization_feasible(200000, 0, 1000, 300)
-    assert is_feasible
-    assert isclose(required_payment, 200000 / 300, rel_tol=1e-4)
 
 
 def test_simulate_mortgage_with_rate_curve():
