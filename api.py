@@ -14,7 +14,7 @@ import os
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
-from pydantic import BaseModel, Field, validator
+from pydantic import BaseModel, Field, root_validator, validator
 import uvicorn
 
 from main import (
@@ -52,6 +52,7 @@ class Deal(BaseModel):
 
     @validator('end_month')
     def end_after_start(cls, v, values):
+        """Ensure end_month is greater than start_month"""
         if 'start_month' in values and v <= values['start_month']:
             raise ValueError('end_month must be greater than start_month')
         return v
@@ -61,17 +62,63 @@ class MortgageParameters(BaseModel):
     """Mortgage-related input parameters"""
     amount: float = Field(..., gt=0, description="Initial mortgage amount in pounds")
     term_years: float = Field(..., gt=0, le=40, description="Mortgage term in years")
-    fixed_rate: float = Field(0.0, ge=0, le=15, description="Fixed interest rate as percentage (legacy, use deals instead)")
-    fixed_term_months: int = Field(0, ge=0, description="Fixed rate term in months (legacy, use deals instead)")
-    variable_rate: float = Field(6.0, ge=0, le=15, description="Variable rate / SVR as percentage")
+    fixed_rate: float = Field(0.0, ge=0, le=15, description="Fixed interest rate as percentage (legacy, use deals)")
+    fixed_term_months: int = Field(0, ge=0, description="Fixed rate term in months (legacy, use deals)")
+    variable_rate: float = Field(6.0, ge=0, le=15, description="Variable rate after fixed term as percentage")
     deals: Optional[List[Deal]] = Field(None, description="List of fixed-rate deal periods")
 
 
+class SavingsAccount(BaseModel):
+    """Individual savings/investment account"""
+    name: str = Field(..., min_length=1, max_length=50, description="Account name (e.g., 'ISA', 'SIPP')")
+    rate: float = Field(..., ge=0, le=15, description="Annual interest rate as percentage")
+    monthly_contribution: float = Field(0.0, ge=0, description="Monthly contribution in pounds")
+    initial_balance: float = Field(0.0, ge=0, description="Initial balance in pounds")
+
+
 class SavingsParameters(BaseModel):
-    """Savings-related input parameters"""
-    rate: float = Field(4.30, ge=0, le=15, description="Annual savings interest rate as percentage")
-    monthly_contribution: float = Field(2500.0, ge=0, description="Monthly savings contribution in pounds")
-    initial_balance: float = Field(170000.0, ge=0, description="Initial savings balance in pounds")
+    """Savings-related input parameters - supports multiple accounts"""
+    accounts: Optional[List[SavingsAccount]] = Field(
+        None,
+        description="List of savings/investment accounts"
+    )
+    # Legacy single-account fields for backward compatibility
+    rate: Optional[float] = Field(None, ge=0, le=15, description="[DEPRECATED] Use accounts instead")
+    monthly_contribution: Optional[float] = Field(None, ge=0, description="[DEPRECATED] Use accounts instead")
+    initial_balance: Optional[float] = Field(None, ge=0, description="[DEPRECATED] Use accounts instead")
+
+    @root_validator(pre=True)
+    def handle_legacy_format(cls, values):
+        """Convert legacy single-account format to multi-account format"""
+        accounts = values.get('accounts')
+
+        # If accounts is provided and non-empty, use it directly
+        if accounts and len(accounts) > 0:
+            return values
+
+        # Check for legacy fields
+        legacy_rate = values.get('rate')
+        legacy_contrib = values.get('monthly_contribution')
+        legacy_balance = values.get('initial_balance')
+
+        # If any legacy field is provided, create a single account from them
+        if any(v is not None for v in [legacy_rate, legacy_contrib, legacy_balance]):
+            values['accounts'] = [{
+                'name': 'Savings',
+                'rate': legacy_rate if legacy_rate is not None else 4.30,
+                'monthly_contribution': legacy_contrib if legacy_contrib is not None else 2500.0,
+                'initial_balance': legacy_balance if legacy_balance is not None else 170000.0
+            }]
+        else:
+            # No accounts and no legacy fields - use default
+            values['accounts'] = [{
+                'name': 'Savings',
+                'rate': 4.30,
+                'monthly_contribution': 2500.0,
+                'initial_balance': 170000.0
+            }]
+
+        return values
 
 
 class SimulationParameters(BaseModel):
@@ -88,32 +135,24 @@ class SimulationRequest(BaseModel):
     savings: SavingsParameters
     simulation: SimulationParameters = SimulationParameters()
 
-    @validator('mortgage')
-    def validate_mortgage(cls, v, values):
-        """Validate deals don't overlap and are within term"""
-        term_months = int(v.term_years * 12)
 
-        if v.deals is not None:
-            for deal in v.deals:
-                if deal.end_month > term_months:
-                    raise ValueError(
-                        f"Deal end month ({deal.end_month}) exceeds total term ({term_months} months)"
-                    )
-            # Check for overlaps
-            sorted_deals = sorted(v.deals, key=lambda d: d.start_month)
-            for i in range(1, len(sorted_deals)):
-                if sorted_deals[i].start_month < sorted_deals[i - 1].end_month:
-                    raise ValueError(
-                        f"Deals overlap: deal ending at month {sorted_deals[i-1].end_month} "
-                        f"overlaps with deal starting at month {sorted_deals[i].start_month}"
-                    )
+def build_rate_curve(mortgage: MortgageParameters, term_months: int) -> List[float]:
+    """Build a full month-by-month rate curve from deals + variable_rate.
+
+    If deals is None, synthesize from legacy fixed_rate/fixed_term_months.
+    """
+    deals = mortgage.deals
+    if deals is None:
+        if mortgage.fixed_term_months > 0:
+            deals = [Deal(start_month=0, end_month=mortgage.fixed_term_months, rate=mortgage.fixed_rate)]
         else:
-            # Legacy validation
-            if v.fixed_term_months >= term_months:
-                raise ValueError(
-                    f"Fixed term ({v.fixed_term_months} months) must be less than total term ({term_months} months)"
-                )
-        return v
+            deals = []
+
+    rate_curve = [mortgage.variable_rate] * term_months
+    for deal in deals:
+        for m in range(deal.start_month, min(deal.end_month, term_months)):
+            rate_curve[m] = deal.rate
+    return rate_curve
 
 
 # Response Models
@@ -138,28 +177,46 @@ class MonthlyData(BaseModel):
     payment_difference: float = Field(..., description="Difference between typical payment and actual payment")
 
 
+class AccountSummary(BaseModel):
+    """Summary statistics for a single savings account"""
+    name: str = Field(..., description="Account name")
+    final_balance: float = Field(..., description="Final balance for this account")
+    total_contributions: float = Field(..., description="Total contributions made to this account")
+    total_interest_earned: float = Field(..., description="Total interest earned on this account")
+
+
 class SummaryStatistics(BaseModel):
     """Summary statistics from the simulation"""
     final_mortgage_balance: float = Field(..., description="Final mortgage balance")
-    final_savings_balance: float = Field(..., description="Final savings balance")
+    final_savings_balance: float = Field(..., description="Final savings balance (consolidated)")
     final_net_worth: float = Field(..., description="Final net worth")
-    min_savings_balance: float = Field(..., description="Lowest savings balance during simulation")
+    min_savings_balance: float = Field(..., description="Lowest savings balance during simulation (consolidated)")
     min_savings_month: int = Field(..., description="Month when savings hit minimum")
     mortgage_paid_off_month: Optional[int] = Field(None, description="Month when mortgage is paid off (if applicable)")
     fixed_term_end_balance: Optional[float] = Field(None, description="Balance at end of fixed term")
+    account_summaries: List[AccountSummary] = Field(default_factory=list, description="Per-account summary statistics")
+
+
+class AccountChartData(BaseModel):
+    """Chart data for a single savings account"""
+    name: str = Field(..., description="Account name")
+    balance: List[float] = Field(..., description="Account balance over time")
+    interest_received: List[float] = Field(..., description="Interest received per month")
+    contributions: List[float] = Field(..., description="Contributions per month")
 
 
 class ChartData(BaseModel):
     """Aggregated data suitable for charting"""
     years: List[float] = Field(..., description="Year values for x-axis")
     mortgage_balance: List[float] = Field(..., description="Mortgage balance over time")
-    savings_balance: List[float] = Field(..., description="Savings balance over time")
+    savings_balance: List[float] = Field(..., description="Savings balance over time (consolidated)")
     net_worth: List[float] = Field(..., description="Net worth over time")
     monthly_payments: List[float] = Field(..., description="Monthly payments over time")
     interest_paid: List[float] = Field(..., description="Monthly interest paid")
     principal_paid: List[float] = Field(..., description="Monthly principal paid")
-    monthly_savings_data: List[float] = Field(..., description="Monthly savings contributions")
-    interest_received: List[float] = Field(..., description="Monthly interest received from savings")
+    monthly_savings_data: List[float] = Field(..., description="Monthly savings contributions (consolidated)")
+    interest_received: List[float] = Field(..., description="Monthly interest received from savings (consolidated)")
+    accounts: List[AccountChartData] = Field(default_factory=list, description="Per-account chart data")
 
 
 class SimulationResponse(BaseModel):
@@ -171,51 +228,47 @@ class SimulationResponse(BaseModel):
 
 
 # Utility functions
-def build_rate_curve(mortgage: MortgageParameters, term_months: int) -> List[float]:
-    """Build a full rate curve from deals + variable_rate.
-    If deals is None, synthesize from legacy fixed_rate/fixed_term_months."""
-    deals = mortgage.deals
-    if deals is None:
-        # Legacy: synthesize one deal from fixed_rate/fixed_term_months
-        if mortgage.fixed_term_months > 0:
-            deals = [Deal(start_month=0, end_month=mortgage.fixed_term_months, rate=mortgage.fixed_rate)]
-        else:
-            deals = []
-
-    rate_curve = [mortgage.variable_rate] * term_months
-    for deal in deals:
-        for m in range(deal.start_month, min(deal.end_month, term_months)):
-            rate_curve[m] = deal.rate
-    return rate_curve
-
-
 def create_chart_data(results: Dict[str, Any], request: SimulationRequest, display_limit_month: Optional[int] = None) -> ChartData:
     """Convert simulation results to chart-friendly format"""
     month_data = results['month_data']
-    
+
     # Determine display limit
     if display_limit_month is None:
         display_limit_month = len(month_data)
-    
+
     # Extract base data
     years = [data['year'] for data in month_data[:display_limit_month]]
     mortgage_balance = [data['principal_end'] for data in month_data[:display_limit_month]]
     savings_balance = [data['savings_balance_end'] for data in month_data[:display_limit_month]]
     net_worth = [data['net_worth'] for data in month_data[:display_limit_month]]
-    
+
     # Payment breakdown data
     monthly_payments = [data['monthly_payment'] for data in month_data[:display_limit_month]]
     interest_paid = [data['interest_paid'] for data in month_data[:display_limit_month]]
     principal_paid = [max(0, data['principal_repaid']) for data in month_data[:display_limit_month]]
-    
-    # Savings data
+
+    # Consolidated savings data
+    total_monthly_contribution = sum(acc.monthly_contribution for acc in request.savings.accounts) if request.savings.accounts else 0
     monthly_savings_data = [
-        request.savings.monthly_contribution + 
+        total_monthly_contribution +
         (max(0, request.simulation.typical_payment - data['monthly_payment']) if request.simulation.typical_payment > 0 else 0)
         for data in month_data[:display_limit_month]
     ]
     interest_received = [data['savings_interest'] for data in month_data[:display_limit_month]]
-    
+
+    # Per-account chart data
+    accounts_chart_data = []
+    if month_data and 'accounts' in month_data[0]:
+        account_names = list(month_data[0]['accounts'].keys())
+        for name in account_names:
+            account_data = AccountChartData(
+                name=name,
+                balance=[data['accounts'][name]['balance_end'] for data in month_data[:display_limit_month]],
+                interest_received=[data['accounts'][name]['interest'] for data in month_data[:display_limit_month]],
+                contributions=[data['accounts'][name]['contribution'] for data in month_data[:display_limit_month]]
+            )
+            accounts_chart_data.append(account_data)
+
     return ChartData(
         years=years,
         mortgage_balance=mortgage_balance,
@@ -225,7 +278,8 @@ def create_chart_data(results: Dict[str, Any], request: SimulationRequest, displ
         interest_paid=interest_paid,
         principal_paid=principal_paid,
         monthly_savings_data=monthly_savings_data,
-        interest_received=interest_received
+        interest_received=interest_received,
+        accounts=accounts_chart_data
     )
 
 
@@ -233,16 +287,22 @@ def create_summary_statistics(results: Dict[str, Any], request: SimulationReques
     """Create summary statistics from simulation results"""
     last_month = results["month_data"][-1]
 
-    # Calculate fixed term end balance (use first deal's end_month, or legacy fixed_term_months)
+    # Calculate fixed term end balance
     fixed_term_end_balance = None
-    deals = request.mortgage.deals
-    if deals and len(deals) > 0:
-        first_deal_end = deals[0].end_month
-        if 0 < first_deal_end <= len(results["month_data"]):
-            fixed_term_end_balance = results["month_data"][first_deal_end - 1]["principal_end"]
-    elif (request.mortgage.fixed_term_months > 0 and
-          request.mortgage.fixed_term_months <= len(results["month_data"])):
+    if (request.mortgage.fixed_term_months > 0 and
+        request.mortgage.fixed_term_months <= len(results["month_data"])):
         fixed_term_end_balance = results["month_data"][request.mortgage.fixed_term_months - 1]["principal_end"]
+
+    # Build per-account summaries from results
+    account_summaries = []
+    if "account_summaries" in results:
+        for acc_summary in results["account_summaries"]:
+            account_summaries.append(AccountSummary(
+                name=acc_summary["name"],
+                final_balance=acc_summary["final_balance"],
+                total_contributions=acc_summary["total_contributions"],
+                total_interest_earned=acc_summary["total_interest_earned"]
+            ))
 
     return SummaryStatistics(
         final_mortgage_balance=last_month['principal_end'],
@@ -251,7 +311,8 @@ def create_summary_statistics(results: Dict[str, Any], request: SimulationReques
         min_savings_balance=results["min_savings_balance"],
         min_savings_month=results["min_savings_month"],
         mortgage_paid_off_month=results.get("mortgage_paid_off_month"),
-        fixed_term_end_balance=fixed_term_end_balance
+        fixed_term_end_balance=fixed_term_end_balance,
+        account_summaries=account_summaries
     )
 
 
@@ -287,11 +348,8 @@ async def simulate_mortgage_endpoint(request: SimulationRequest):
         # Convert parameters
         term_months = int(request.mortgage.term_years * 12)
 
-        # Build full rate curve from deals
+        # Build rate curve from deals
         rate_curve = build_rate_curve(request.mortgage, term_months)
-
-        # Create savings rate curve
-        savings_rate_curve = [request.savings.rate for _ in range(term_months)]
 
         # Parse overpayments
         overpayment_schedule = {}
@@ -300,20 +358,29 @@ async def simulate_mortgage_endpoint(request: SimulationRequest):
         else:
             overpayment_schedule = dict.fromkeys(range(term_months), 0)
 
+        # Convert savings accounts to dict format for simulation
+        savings_accounts = [
+            {
+                'name': acc.name,
+                'rate': acc.rate,
+                'monthly_contribution': acc.monthly_contribution,
+                'initial_balance': acc.initial_balance
+            }
+            for acc in (request.savings.accounts or [])
+        ]
+
         # Run simulation
         results = simulate_mortgage(
             mortgage_amount=request.mortgage.amount,
             term_months=term_months,
             fixed_rate=request.mortgage.fixed_rate,
             fixed_term_months=request.mortgage.fixed_term_months,
-            mortgage_rate_curve=[request.mortgage.variable_rate] * term_months,
-            savings_rate_curve=savings_rate_curve,
+            mortgage_rate_curve=[],
+            rate_curve=rate_curve,
             overpayment_schedule=overpayment_schedule,
-            monthly_savings_contribution=request.savings.monthly_contribution,
-            initial_savings=request.savings.initial_balance,
+            savings_accounts=savings_accounts,
             typical_payment=request.simulation.typical_payment,
             asset_value=request.simulation.asset_value,
-            rate_curve=rate_curve,
         )
         
         # Convert month data to Pydantic models
@@ -343,7 +410,7 @@ async def simulate_mortgage_endpoint(request: SimulationRequest):
 async def export_simulation_csv(request: SimulationRequest):
     """
     Run simulation and return results as CSV file download
-    
+
     This endpoint runs the same simulation as /simulate but returns the results
     as a downloadable CSV file for further analysis in Excel or other tools.
     """
@@ -351,7 +418,6 @@ async def export_simulation_csv(request: SimulationRequest):
         # Run simulation (reuse logic from simulate endpoint)
         term_months = int(request.mortgage.term_years * 12)
         rate_curve = build_rate_curve(request.mortgage, term_months)
-        savings_rate_curve = [request.savings.rate for _ in range(term_months)]
 
         overpayment_schedule = {}
         if request.simulation.overpayments:
@@ -359,30 +425,39 @@ async def export_simulation_csv(request: SimulationRequest):
         else:
             overpayment_schedule = dict.fromkeys(range(term_months), 0)
 
+        # Convert savings accounts to dict format for simulation
+        savings_accounts = [
+            {
+                'name': acc.name,
+                'rate': acc.rate,
+                'monthly_contribution': acc.monthly_contribution,
+                'initial_balance': acc.initial_balance
+            }
+            for acc in (request.savings.accounts or [])
+        ]
+
         results = simulate_mortgage(
             mortgage_amount=request.mortgage.amount,
             term_months=term_months,
             fixed_rate=request.mortgage.fixed_rate,
             fixed_term_months=request.mortgage.fixed_term_months,
-            mortgage_rate_curve=[request.mortgage.variable_rate] * term_months,
-            savings_rate_curve=savings_rate_curve,
+            mortgage_rate_curve=[],
+            rate_curve=rate_curve,
             overpayment_schedule=overpayment_schedule,
-            monthly_savings_contribution=request.savings.monthly_contribution,
-            initial_savings=request.savings.initial_balance,
+            savings_accounts=savings_accounts,
             typical_payment=request.simulation.typical_payment,
             asset_value=request.simulation.asset_value,
-            rate_curve=rate_curve,
         )
-        
+
         # Save to CSV and return file
         csv_file_path = save_results_to_csv(results, request.simulation.asset_value)
-        
+
         return FileResponse(
             path=csv_file_path,
             filename=os.path.basename(csv_file_path),
             media_type='text/csv'
         )
-        
+
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Export error: {str(e)}")
 
@@ -391,7 +466,7 @@ async def export_simulation_csv(request: SimulationRequest):
 async def get_sample_request():
     """
     Get a sample simulation request with realistic default values
-    
+
     This endpoint returns a properly formatted sample request that can be used
     as a starting point for customization or testing.
     """
@@ -405,9 +480,14 @@ async def get_sample_request():
             deals=[Deal(start_month=0, end_month=12, rate=1.65)]
         ),
         savings=SavingsParameters(
-            rate=4.30,
-            monthly_contribution=2500.0,
-            initial_balance=170000.0
+            accounts=[
+                SavingsAccount(
+                    name="Main Savings",
+                    rate=4.30,
+                    monthly_contribution=2500.0,
+                    initial_balance=170000.0
+                )
+            ]
         ),
         simulation=SimulationParameters(
             typical_payment=878.0,
