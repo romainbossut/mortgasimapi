@@ -74,6 +74,7 @@ class SavingsAccount(BaseModel):
     rate: float = Field(..., ge=0, le=15, description="Annual interest rate as percentage")
     monthly_contribution: float = Field(0.0, ge=0, description="Monthly contribution in pounds")
     initial_balance: float = Field(0.0, ge=0, description="Initial balance in pounds")
+    draw_for_repayment: bool = Field(True, description="Whether this account's balance can be used for mortgage overpayments")
 
 
 class SavingsParameters(BaseModel):
@@ -173,7 +174,8 @@ def run_simulation(request: SimulationRequest) -> Dict[str, Any]:
             'name': acc.name,
             'rate': acc.rate,
             'monthly_contribution': acc.monthly_contribution,
-            'initial_balance': acc.initial_balance
+            'initial_balance': acc.initial_balance,
+            'draw_for_repayment': acc.draw_for_repayment,
         }
         for acc in (request.savings.accounts or [])
     ]

@@ -272,3 +272,120 @@ class TestMultipleAccounts:
         assert results["account_summaries"][0]["total_contributions"] == 0
         # Total interest should be positive
         assert results["account_summaries"][0]["total_interest_earned"] > 0
+
+
+class TestDrawForRepayment:
+    """Test draw_for_repayment flag on savings accounts."""
+
+    def test_overpayment_only_from_drawable_account(self):
+        """Overpayment should only deduct from accounts with draw_for_repayment=True."""
+        accounts = [
+            {"name": "Drawable", "rate": 4.0, "monthly_contribution": 0, "initial_balance": 50000, "draw_for_repayment": True},
+            {"name": "Protected", "rate": 4.0, "monthly_contribution": 0, "initial_balance": 50000, "draw_for_repayment": False},
+        ]
+
+        overpayment_schedule = {0: 10000}
+
+        results = simulate_mortgage(
+            mortgage_amount=200000,
+            term_months=24,
+            fixed_rate=2.0,
+            fixed_term_months=12,
+            mortgage_rate_curve=[4.0] * 12,
+            overpayment_schedule=overpayment_schedule,
+            savings_accounts=accounts,
+        )
+
+        first_month = results["month_data"][0]
+        drawable_balance = first_month["accounts"]["Drawable"]["balance_end"]
+        protected_balance = first_month["accounts"]["Protected"]["balance_end"]
+
+        # Drawable account should have been reduced by the overpayment
+        # Initial 50000 - 10000 overpayment + interest
+        assert drawable_balance < 50000
+        assert drawable_balance < 41000  # ~40000 + small interest
+
+        # Protected account should NOT have been reduced — only gains interest
+        assert protected_balance > 50000
+
+    def test_overpayment_capped_by_drawable_balance(self):
+        """Overpayment should be capped by drawable balance, not total balance."""
+        accounts = [
+            {"name": "Drawable", "rate": 0.0, "monthly_contribution": 0, "initial_balance": 5000, "draw_for_repayment": True},
+            {"name": "Protected", "rate": 0.0, "monthly_contribution": 0, "initial_balance": 95000, "draw_for_repayment": False},
+        ]
+
+        # Request 20000 overpayment but only 5000 is drawable
+        overpayment_schedule = {0: 20000}
+
+        results = simulate_mortgage(
+            mortgage_amount=200000,
+            term_months=24,
+            fixed_rate=2.0,
+            fixed_term_months=12,
+            mortgage_rate_curve=[4.0] * 12,
+            overpayment_schedule=overpayment_schedule,
+            savings_accounts=accounts,
+        )
+
+        first_month = results["month_data"][0]
+        # Overpayment should be capped to 5000
+        assert first_month["overpayment"] == 5000
+
+        # Protected account untouched
+        assert first_month["accounts"]["Protected"]["balance_end"] == 95000
+
+        # Warning about reduction should be present
+        assert any("reduced" in w.lower() for w in results["warnings"])
+
+    def test_default_draw_for_repayment_is_true(self):
+        """Accounts without draw_for_repayment should default to True (backward compat)."""
+        accounts = [
+            {"name": "Account A", "rate": 0.0, "monthly_contribution": 0, "initial_balance": 50000},
+            {"name": "Account B", "rate": 0.0, "monthly_contribution": 0, "initial_balance": 50000},
+        ]
+
+        overpayment_schedule = {0: 10000}
+
+        results = simulate_mortgage(
+            mortgage_amount=200000,
+            term_months=24,
+            fixed_rate=2.0,
+            fixed_term_months=12,
+            mortgage_rate_curve=[4.0] * 12,
+            overpayment_schedule=overpayment_schedule,
+            savings_accounts=accounts,
+        )
+
+        first_month = results["month_data"][0]
+        # Both accounts should be deducted proportionally (50/50 = 5000 each)
+        assert first_month["accounts"]["Account A"]["balance_end"] == 45000
+        assert first_month["accounts"]["Account B"]["balance_end"] == 45000
+
+    def test_proportional_deduction_among_drawable_accounts(self):
+        """Overpayment should be deducted proportionally among drawable accounts."""
+        accounts = [
+            {"name": "Big", "rate": 0.0, "monthly_contribution": 0, "initial_balance": 75000, "draw_for_repayment": True},
+            {"name": "Small", "rate": 0.0, "monthly_contribution": 0, "initial_balance": 25000, "draw_for_repayment": True},
+            {"name": "Protected", "rate": 0.0, "monthly_contribution": 0, "initial_balance": 100000, "draw_for_repayment": False},
+        ]
+
+        overpayment_schedule = {0: 10000}
+
+        results = simulate_mortgage(
+            mortgage_amount=200000,
+            term_months=24,
+            fixed_rate=2.0,
+            fixed_term_months=12,
+            mortgage_rate_curve=[4.0] * 12,
+            overpayment_schedule=overpayment_schedule,
+            savings_accounts=accounts,
+        )
+
+        first_month = results["month_data"][0]
+        # Big: 75000 / 100000 * 10000 = 7500 deducted → 67500
+        assert first_month["accounts"]["Big"]["balance_end"] == 67500
+        # Small: 25000 / 100000 * 10000 = 2500 deducted → 22500
+        assert first_month["accounts"]["Small"]["balance_end"] == 22500
+        # Protected: untouched
+        assert first_month["accounts"]["Protected"]["balance_end"] == 100000

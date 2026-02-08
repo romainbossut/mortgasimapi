@@ -101,22 +101,32 @@ def create_overpayment_schedule(
 def handle_overpayment(
     overpayment: float,
     savings_balance: float,
-    month: int
+    month: int,
+    drawable_balance: float | None = None,
 ) -> tuple[float, float, str | None]:
     """Handle overpayment logic and constraints.
-    
+
+    Parameters:
+    - overpayment: requested overpayment amount
+    - savings_balance: total consolidated savings balance
+    - month: current month index (0-based)
+    - drawable_balance: sum of balances from accounts with draw_for_repayment=True.
+      If None, defaults to savings_balance (all accounts are drawable).
+
     Returns:
     - Tuple of (adjusted_overpayment, new_savings_balance, warning_message)
     """
     warning_message = None
     adjusted_overpayment = overpayment
 
-    if overpayment > savings_balance:
+    cap = drawable_balance if drawable_balance is not None else savings_balance
+
+    if overpayment > cap:
         warning_message = (
             f"Month {month}: Overpayment reduced from £{overpayment:,.2f} "
-            f"to £{savings_balance:,.2f} due to insufficient savings."
+            f"to £{cap:,.2f} due to insufficient savings."
         )
-        adjusted_overpayment = savings_balance
+        adjusted_overpayment = cap
 
     new_savings_balance = savings_balance - adjusted_overpayment
     return adjusted_overpayment, new_savings_balance, warning_message
@@ -383,22 +393,29 @@ def simulate_mortgage(
         if warning:
             results["warnings"].append(warning)
 
-        # Handle overpayment (using consolidated savings balance)
+        # Handle overpayment (using drawable savings balance)
         overpayment = overpayment_schedule.get(m, 0.0)
+        drawable_balance = sum(
+            account_balances[acc['name']]
+            for acc in savings_accounts
+            if acc.get('draw_for_repayment', True)
+        )
         overpayment, savings_balance, warning = handle_overpayment(
-            overpayment, savings_balance, m
+            overpayment, savings_balance, m, drawable_balance=drawable_balance
         )
         if warning:
             results["warnings"].append(warning)
 
-        # If overpayment was reduced due to insufficient funds, distribute the reduction
-        # proportionally across accounts (deduct from accounts with highest balances first)
+        # Deduct overpayment proportionally from drawable accounts only
         if overpayment > 0:
-            # Deduct overpayment from accounts proportionally to their balances
-            total_balance = sum(account_balances.values())
-            if total_balance > 0:
-                for name in account_balances:
-                    proportion = account_balances[name] / total_balance
+            drawable_accounts = [
+                acc['name'] for acc in savings_accounts
+                if acc.get('draw_for_repayment', True)
+            ]
+            drawable_total = sum(account_balances[n] for n in drawable_accounts)
+            if drawable_total > 0:
+                for name in drawable_accounts:
+                    proportion = account_balances[name] / drawable_total
                     deduction = overpayment * proportion
                     account_balances[name] -= deduction
 
